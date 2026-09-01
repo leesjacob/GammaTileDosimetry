@@ -74,23 +74,6 @@ class DoseInterpolator:
     ], dtype=np.float64)
 
     def __init__(self):
-        self.angles = np.array([0, 5, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90])
-        self.radii_cm = np.array([0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 5.0, 7.0])
-        self.dose_table = np.array([
-            [185.4, 29.3, 4.25, 2.04, 0.942, 0.205, 0.0778, 0.01874, 0.00602],
-            [185.4, 31.3, 4.08, 1.935, 0.911, 0.206, 0.0782, 0.01881, 0.00596],
-            [185.4, 32.8, 4.00, 1.826, 0.836, 0.1876, 0.0724, 0.01777, 0.00572],
-            [185.4, 31.5, 3.67, 1.692, 0.794, 0.1831, 0.0714, 0.01765, 0.00570],
-            [185.4, 28.3, 3.45, 1.650, 0.789, 0.1846, 0.0720, 0.01781, 0.00575],
-            [185.4, 26.6, 3.62, 1.747, 0.836, 0.1940, 0.0752, 0.01848, 0.00593],
-            [185.4, 25.8, 3.86, 1.864, 0.889, 0.204, 0.0786, 0.01915, 0.00613],
-            [185.4, 24.0, 4.04, 1.957, 0.932, 0.212, 0.0813, 0.01969, 0.00629],
-            [145.9, 22.2, 4.15, 2.02, 0.965, 0.219, 0.0836, 0.0202, 0.00643],
-            [100.2, 19.29, 4.25, 2.11, 1.009, 0.228, 0.0870, 0.0209, 0.00666],
-            [79.3, 17.24, 4.25, 2.14, 1.034, 0.234, 0.0892, 0.0214, 0.00682],
-            [67.9, 15.85, 4.20, 2.15, 1.048, 0.238, 0.0907, 0.0218, 0.00692],
-            [61.3, 14.95, 4.14, 2.15, 1.055, 0.241, 0.0917, 0.0220, 0.00700]
-        ], dtype=np.float32)
         # Precompute reference geometry factor G_L(r0=1.0, theta0=90°)
         self._GL_ref = self._geometry_factor(1.0, 90.0)
 
@@ -173,17 +156,6 @@ class DoseInterpolator:
 
         rate = self._tg43_dose_rate(angle_deg, radius_cm_eff)
         return self.DOSE_CONVERSION_FACTOR * max(0.0, rate)
-
-    def raw_dose_rate(self, angle_deg, radius_cm):
-        """Return dose rate in cGy/h/U (no conversion factor) for TG-43 table validation."""
-        angle_deg = angle_deg % 360
-        if angle_deg > 180:
-            angle_deg = 360 - angle_deg
-        if angle_deg > 90:
-            angle_deg = 180 - angle_deg
-        angle_deg = float(np.clip(angle_deg, 0, 90))
-        radius_cm_eff = float(np.clip(radius_cm, 0.041, 10.0))
-        return max(0.0, self._tg43_dose_rate(angle_deg, radius_cm_eff))
 
     def _tg43_dose_rate(self, theta_deg, r):
         """Core TG-43U1 2D calculation: Lambda * [G_L(r,theta)/G_L(r0,theta0)] * g_L(r) * F(r,theta)."""
@@ -595,6 +567,7 @@ class IsodoseSurfaceGenerator:
         
         modelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"{name_prefix}_{dose_level:.0f}cGy")
         modelNode.SetAndObservePolyData(surface)
+        modelNode.SetAttribute("DoseLevel_cGy", f"{dose_level:.1f}")
         
         displayNode = modelNode.GetDisplayNode()
         if displayNode is None:
@@ -635,33 +608,6 @@ class GammaTileModule(ScriptedLoadableModule):
             "This module was developed as part of the IntraOp GammaTile Research project at the University of Minnesota, "
             "with input from the radiation oncology and neurosurgery teams."
         )
-
-
-# Reference dose rate (cGy/h/U) along tile normal for a single 4-seed GammaTile.
-# Distance in mm from tile center; negative = opposite side of normal.
-# Source: dose_along_normal-2.csv
-_TILE_NORMAL_REF_DATA = [
-    # (distance_mm, superposed_dose_rate_cGy_h_U) from Table XII
-    (-100.0, 0.027908),
-    (-70.0,  0.086255),
-    (-50.0,  0.349537),
-    (-30.0,  0.905364),
-    (-20.0,  3.362893),
-    (-10.0,  6.871183),
-    (-5.0,   9.559224),
-    (-2.5,  10.835737),
-    (-1.0,  11.314545),
-    (0.0,   11.413081),
-    (1.0,   11.314545),
-    (2.5,   10.835737),
-    (5.0,    9.559224),
-    (10.0,   6.871183),
-    (20.0,   3.362893),
-    (30.0,   0.905364),
-    (50.0,   0.349537),
-    (70.0,   0.086255),
-    (100.0,  0.027908),
-]
 
 
 class GammaTileWidget(ScriptedLoadableModuleWidget):
@@ -813,14 +759,6 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
         self.exportDoseVolumeButton.clicked.connect(self.onExportDoseVolume)
         exportFormLayout.addWidget(self.exportDoseVolumeButton)
 
-        self.exportValidationButton = qt.QPushButton("Validation Error CSV")
-        self.exportValidationButton.clicked.connect(self.onExportValidationCSV)
-        exportFormLayout.addWidget(self.exportValidationButton)
-
-        self.exportTileNormalValidationButton = qt.QPushButton("Tile Normal Superposition Validation CSV")
-        self.exportTileNormalValidationButton.clicked.connect(self.onExportTileNormalValidationCSV)
-        exportFormLayout.addWidget(self.exportTileNormalValidationButton)
-        
         # Tile counter (bottom of panel) - show both tiles and seeds
         tileCounterFrame = qt.QFrame()
         tileCounterLayout = qt.QHBoxLayout(tileCounterFrame)
@@ -2975,72 +2913,6 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
             self.updateSelectionDisplay()
         self.statusLabel.setText(f"Tiles: {len(self.logic.tiles)}  Seeds: {len(self.logic.seeds)}")
     
-    def printSeedValidationTables(self):
-        """Print TG-43U1 computed dose rate vs Table XII reference with % error."""
-        interp = self.logic.interpolator
-        angles = interp.angles      # [0,5,10,...,90] deg
-        radii  = interp.radii_cm    # [0.1,0.25,...,10] cm
-        ref_table = interp.dose_table  # Table XII reference values
-
-        # Cells where Table XII has no value (theta < 40 at r=0.1)
-        BLANK_CELLS = {(t_idx, 0) for t_idx, theta in enumerate(angles) if theta < 40}
-
-        sep = "=" * (16 + 9 * len(radii))
-        r_header = "  ".join(f"{r:>7.2f}" for r in radii)
-
-        def print_table(label):
-            print(f"\n{sep}")
-            print(f"  {label}")
-            print(f"  Computed vs Table XII (cGy/h/U)")
-            print(sep)
-
-            # Computed values
-            print(f"\n  Computed (TG-43U1 formula):")
-            print(f"  {'theta':>7s}  " + r_header)
-            print("-" * (16 + 9 * len(radii)))
-            for t_idx, theta in enumerate(angles):
-                row = "  ".join(
-                    f"{'---':>7s}" if (t_idx, r_idx) in BLANK_CELLS
-                    else f"{interp.raw_dose_rate(theta, r):>7.4f}"
-                    for r_idx, r in enumerate(radii)
-                )
-                print(f"  {theta:>7.1f}  {row}")
-
-            # Reference values
-            print(f"\n  Reference (Table XII):")
-            print(f"  {'theta':>7s}  " + r_header)
-            print("-" * (16 + 9 * len(radii)))
-            for t_idx, theta in enumerate(angles):
-                row = "  ".join(
-                    f"{'---':>7s}" if (t_idx, r_idx) in BLANK_CELLS
-                    else f"{float(ref_table[t_idx, r_idx]):>7.4f}"
-                    for r_idx, r in enumerate(radii)
-                )
-                print(f"  {theta:>7.1f}  {row}")
-
-            # % Error
-            print(f"\n  % Error (|computed - ref| / ref * 100):")
-            print(f"  {'theta':>7s}  " + r_header)
-            print("-" * (16 + 9 * len(radii)))
-            for t_idx, theta in enumerate(angles):
-                cells = []
-                for r_idx, r in enumerate(radii):
-                    if (t_idx, r_idx) in BLANK_CELLS:
-                        cells.append(f"{'---':>7s}")
-                    else:
-                        code_val = interp.raw_dose_rate(theta, r)
-                        ref_val = float(ref_table[t_idx, r_idx])
-                        pct = abs(code_val - ref_val) / ref_val * 100 if ref_val != 0 else 0.0
-                        cells.append(f"{pct:>6.2f}%")
-                print(f"  {theta:>7.1f}  " + "  ".join(cells))
-            print(sep)
-
-        for tile_idx, tile in enumerate(self.logic.tiles):
-            for s_idx in range(len(tile.seed_positions_ras)):
-                print_table(f"Tile {tile_idx+1}, Seed {s_idx+1}  (RAS: {tile.seed_positions_ras[s_idx]})")
-        for s_idx, seed in enumerate(self.logic.seeds):
-            print_table(f"Standalone Seed {s_idx+1}  (RAS: {seed.center})")
-
     def printDosageSummary(self, prescription_cgy, max_dose, num_tiles, dims, spacing, bounds_computed, doses_3d, num_seeds=0):
         """Print a clean dosage summary to console."""
         print("\n" + "="*70)
@@ -3061,100 +2933,6 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
             if dose_level <= max_dose:
                 print(f"  {label:>4s}: {dose_level:>7.1f} cGy - RGB({color[0]:.1f}, {color[1]:.1f}, {color[2]:.1f})")
         print("="*70 + "\n")
-        if self.logic.tiles:
-            self.printTileNormalValidation()
-
-    def _compute_tile_normal_dose(self, tile):
-        """Return list of (dist_mm, computed_cGy_h_U, ref_cGy_h_U) along tile normal."""
-        interp = self.logic.interpolator
-        results = []
-        for dist_mm, ref_val in _TILE_NORMAL_REF_DATA:
-            point = tile.center + dist_mm * tile.normal
-            raw_dose = 0.0
-            for seed_pos in tile.seed_positions_ras:
-                relative = point - seed_pos
-                r_total = np.linalg.norm(relative)
-                if r_total < GammaTilePlacement.SEED_DIAMETER_MM / 2.0 or r_total > 100:
-                    continue
-                r_parallel = np.dot(relative, tile.seed_axis_ras)
-                r_perp = np.linalg.norm(relative - r_parallel * tile.seed_axis_ras)
-                theta_deg = np.degrees(np.arctan2(r_perp, abs(r_parallel)))
-                r_cm = r_total / 10.0
-                raw_dose += interp.raw_dose_rate(theta_deg, r_cm)
-            results.append((dist_mm, raw_dose, ref_val))
-        return results
-
-    def printTileNormalValidation(self):
-        """Print dose along normal for each tile vs reference data."""
-        sep = "=" * 60
-        for tile_idx, tile in enumerate(self.logic.tiles):
-            results = self._compute_tile_normal_dose(tile)
-            print(f"\n{sep}")
-            print(f"  Tile {tile_idx+1} — Dose along normal (4-seed superposition)")
-            print(f"  Units: cGy/h/U")
-            print(sep)
-            print(f"  {'dist(mm)':>9s}  {'computed':>11s}  {'reference':>11s}  {'%err':>8s}")
-            print("-" * 48)
-            for dist_mm, computed, ref in results:
-                pct = abs(computed - ref) / ref * 100 if ref != 0 else 0.0
-                print(f"  {dist_mm:>9.2f}  {computed:>11.5f}  {ref:>11.6f}  {pct:>7.3f}%")
-            print(sep)
-
-    def onExportTileNormalValidationCSV(self):
-        if not self.logic.tiles:
-            slicer.util.warningDisplay("No tiles placed.")
-            return
-        result = qt.QFileDialog.getSaveFileName(
-            self.parent, "Save Tile Normal Validation CSV", "tile_normal_validation.csv", "CSV (*.csv)"
-        )
-        path = result[0] if isinstance(result, (tuple, list)) else result
-        if not path or not str(path).strip():
-            return
-        path = str(path).strip()
-        try:
-            with open(path, "w", newline="") as f:
-                w = csv.writer(f)
-                w.writerow(["tile_index", "distance_mm", "computed_cGy_h_U", "ref_cGy_h_U", "percent_error"])
-                for tile_idx, tile in enumerate(self.logic.tiles):
-                    for dist_mm, computed, ref in self._compute_tile_normal_dose(tile):
-                        pct = abs(computed - ref) / ref * 100 if ref != 0 else 0.0
-                        w.writerow([tile_idx + 1, dist_mm, f"{computed:.5f}", f"{ref:.6f}", f"{pct:.3f}"])
-            self.statusLabel.setText(f"Tile normal validation saved: {os.path.basename(path)}")
-        except Exception as e:
-            slicer.util.errorDisplay(f"Could not save CSV: {e}")
-
-    def onExportValidationCSV(self):
-        """Export TG-43 table validation: code value vs reference value vs % error at each grid point."""
-        result = qt.QFileDialog.getSaveFileName(self.parent, "Save Validation Error CSV", "seed_validation.csv", "CSV (*.csv)")
-        path = result[0] if isinstance(result, (tuple, list)) else result
-        if not path or not str(path).strip():
-            return
-        path = str(path).strip()
-
-        interp = self.logic.interpolator
-        angles = interp.angles
-        radii  = interp.radii_cm
-        BLANK_CELLS = {(theta, 0.1) for theta in angles if theta < 40}
-
-        rows = []
-        for t_idx, theta in enumerate(angles):
-            for r_idx, r in enumerate(radii):
-                ref_val = float(interp.dose_table[t_idx, r_idx])
-                if (theta, r) in BLANK_CELLS:
-                    rows.append([theta, r, "", "", "N/A"])
-                else:
-                    code_val = interp.raw_dose_rate(theta, r)
-                    pct_err = abs(code_val - ref_val) / ref_val * 100 if ref_val != 0 else 0.0
-                    rows.append([theta, r, f"{code_val:.5f}", f"{ref_val:.5f}", f"{pct_err:.3f}"])
-
-        try:
-            with open(path, "w", newline="") as f:
-                w = csv.writer(f)
-                w.writerow(["theta_deg", "r_cm", "code_cGy_h_U", "ref_cGy_h_U", "percent_error"])
-                w.writerows(rows)
-            self.statusLabel.setText(f"Validation CSV saved: {os.path.basename(path)}")
-        except Exception as e:
-            slicer.util.errorDisplay(f"Could not save validation CSV: {e}")
 
     def onExportPositions(self):
         if not self.logic.tiles and not self.logic.seeds:
@@ -3175,6 +2953,28 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
             self._writePositionsCSV(path)
         self.statusLabel.setText(f"Exported positions to {os.path.basename(path)}")
     
+    def _isodoseSurfaceBounds(self):
+        """Axis-aligned RAS bounding box of each isodose surface.
+
+        The same model nodes drive the 3D surfaces and their 2D slice-view
+        contours, so one box per dose level bounds both representations.
+        Returns [(name, dose_level_cGy, (xmin, xmax, ymin, ymax, zmin, zmax)), ...].
+        """
+        rows = []
+        for node in self.logic.isodose_nodes_3d:
+            if not node or not node.GetScene():
+                continue
+            polydata = node.GetPolyData()
+            if not polydata or polydata.GetNumberOfPoints() == 0:
+                continue
+            bounds = [0.0] * 6
+            try:
+                node.GetRASBounds(bounds)  # accounts for any parent transforms
+            except (AttributeError, TypeError):
+                bounds = list(polydata.GetBounds())
+            rows.append((node.GetName(), node.GetAttribute("DoseLevel_cGy") or "", tuple(bounds)))
+        return rows
+
     def _writePositionsCSV(self, path):
         """Write tile and seed positions to CSV (consistent with onUpdate log)."""
         with open(path, "w", newline="") as f:
@@ -3208,7 +3008,21 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
                         f"{c[0]:.6f}", f"{c[1]:.6f}", f"{c[2]:.6f}",
                         f"{n[0]:.6f}", f"{n[1]:.6f}", f"{n[2]:.6f}"
                     ])
-    
+            isodose_bounds = self._isodoseSurfaceBounds()
+            if isodose_bounds:
+                w.writerow([])
+                w.writerow(["isodose_surface", "dose_level_cGy",
+                            "min_x_ras_mm", "max_x_ras_mm",
+                            "min_y_ras_mm", "max_y_ras_mm",
+                            "min_z_ras_mm", "max_z_ras_mm"])
+                for name, level, b in isodose_bounds:
+                    w.writerow([
+                        name, level,
+                        f"{b[0]:.6f}", f"{b[1]:.6f}",
+                        f"{b[2]:.6f}", f"{b[3]:.6f}",
+                        f"{b[4]:.6f}", f"{b[5]:.6f}"
+                    ])
+
     def _writePositionsJSON(self, path):
         """Write tile and seed positions to JSON (list of tiles with center, normal, seed_axis, seeds)."""
         tiles_data = []
@@ -3236,8 +3050,23 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
                 "center_ras_mm": [float(c[0]), float(c[1]), float(c[2])],
                 "normal_ras": [float(n[0]), float(n[1]), float(n[2])]
             })
+        isodose_data = []
+        for name, level, b in self._isodoseSurfaceBounds():
+            isodose_data.append({
+                "name": name,
+                "dose_level_cGy": float(level) if level else None,
+                "bounds_ras_mm": {
+                    "x": [float(b[0]), float(b[1])],
+                    "y": [float(b[2]), float(b[3])],
+                    "z": [float(b[4]), float(b[5])]
+                }
+            })
         with open(path, "w") as f:
-            json.dump({"tiles": tiles_data, "standalone_seeds": standalone_seeds_data}, f, indent=2)
+            json.dump({
+                "tiles": tiles_data,
+                "standalone_seeds": standalone_seeds_data,
+                "isodose_surface_bounds": isodose_data
+            }, f, indent=2)
     
     def onExportDoseVolume(self):
         doseNode = self.logic.dose_volume_node
