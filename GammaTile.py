@@ -1,6 +1,10 @@
 """
 GammaView Dosimetry - 3D Slicer Module
 Works with DICOM brain volumes for intraoperative GammaTile placement
+
+The dose grid is evaluated with vectorized NumPy (no per-voxel Python loops),
+isodose/brain surfaces use vtkFlyingEdges3D, and volume ray casting samples a
+cached NumPy array instead of per-voxel VTK calls.
 """
 
 import json
@@ -76,6 +80,24 @@ class DoseInterpolator:
     def __init__(self):
         # Precompute reference geometry factor G_L(r0=1.0, theta0=90°)
         self._GL_ref = self._geometry_factor(1.0, 90.0)
+        # NaN-free copy of the anisotropy table so lookups can be vectorized.
+        # Fill rule matches the original scalar lookup: nearest valid value
+        # searching increasing radius first, then decreasing radius.
+        table = self._F_TABLE.copy()
+        n_r = table.shape[1]
+        for ti in range(table.shape[0]):
+            for ri in range(n_r):
+                if np.isnan(self._F_TABLE[ti, ri]):
+                    filled = 1.0
+                    right = np.where(~np.isnan(self._F_TABLE[ti, ri + 1:]))[0]
+                    if right.size:
+                        filled = self._F_TABLE[ti, ri + 1 + right[0]]
+                    else:
+                        left = np.where(~np.isnan(self._F_TABLE[ti, :ri]))[0]
+                        if left.size:
+                            filled = self._F_TABLE[ti, left[-1]]
+                    table[ti, ri] = filled
+        self._F_TABLE_FILLED = table
 
     def _geometry_factor(self, r, theta_deg):
         """Line-source geometry function G_L(r, theta)."""
@@ -91,78 +113,77 @@ class DoseInterpolator:
         beta = np.arctan2(r_sin, r_cos - L / 2.0) - np.arctan2(r_sin, r_cos + L / 2.0)
         return beta / (L * r * sin_t)
 
+    def _geometry_factor_vec(self, r, theta_deg):
+        """Vectorized line-source geometry function G_L(r, theta) for arrays."""
+        L = self._L
+        theta_rad = np.radians(theta_deg)
+        sin_t = np.sin(theta_rad)
+        cos_t = np.cos(theta_rad)
+        r_sin = r * sin_t
+        r_cos = r * cos_t
+        beta = np.arctan2(r_sin, r_cos - L / 2.0) - np.arctan2(r_sin, r_cos + L / 2.0)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            G = beta / (L * r * sin_t)
+        # On-axis approximation where sin(theta) ~ 0. Guard the singularity at
+        # r = L/2 (point exactly at the source tip): clamp the denominator so the
+        # dose stays finite, at a magnitude comparable to the closest allowed
+        # perpendicular distance (the original scalar code returns inf here).
+        denom = r * r - (L / 2.0) ** 2
+        denom = np.where(np.abs(denom) < 1e-3, np.copysign(1e-3, denom + 1e-300), denom)
+        return np.where(np.abs(theta_deg) < 0.01, 1.0 / denom, G)
+
     def _radial_dose(self, r):
-        # g_L(r) — Eq. 3 from TG-43U1, polynomial fit from CLRP v2
-        r = float(np.clip(r, 0.05, 10.0))
+        # g_L(r) — Eq. 3 from TG-43U1, polynomial fit from CLRP v2 (vectorized)
+        r = np.clip(r, 0.05, 10.0)
         a = self._GR_COEFFS
         return (a[0] * r**-2 + a[1] * r**-1 + a[2] + a[3] * r
                 + a[4] * r**2 + a[5] * r**3) * np.exp(-a[6] * r)
 
     def _anisotropy(self, r, theta_deg):
-        """Anisotropy function F(r, theta) via bilinear interpolation on hardcoded table."""
+        """Anisotropy function F(r, theta): vectorized bilinear interpolation on the (NaN-filled) table."""
         thetas = self._F_THETAS
         radii = self._F_RADII
-        table = self._F_TABLE
+        table = self._F_TABLE_FILLED
 
-        theta_c = float(np.clip(theta_deg, thetas[0], thetas[-1]))
-        r_c = float(np.clip(r, radii[0], radii[-1]))
-        it = int(np.searchsorted(thetas, theta_c, side='right')) - 1
-        it = max(0, min(it, len(thetas) - 2))
-        it2 = it + 1
-        ir = int(np.searchsorted(radii, r_c, side='right')) - 1
-        ir = max(0, min(ir, len(radii) - 2))
-        ir2 = ir + 1
+        theta_c = np.clip(theta_deg, thetas[0], thetas[-1])
+        r_c = np.clip(r, radii[0], radii[-1])
+        it = np.clip(np.searchsorted(thetas, theta_c, side='right') - 1, 0, len(thetas) - 2)
+        ir = np.clip(np.searchsorted(radii, r_c, side='right') - 1, 0, len(radii) - 2)
 
-        def _val(ti, ri):
-            v = table[ti, ri]
-            if np.isnan(v):
-                for k in range(ri + 1, len(radii)):
-                    if not np.isnan(table[ti, k]):
-                        return table[ti, k]
-                for k in range(ri - 1, -1, -1):
-                    if not np.isnan(table[ti, k]):
-                        return table[ti, k]
-                return 1.0
-            return v
-
-        v00 = _val(it, ir)
-        v01 = _val(it, ir2)
-        v10 = _val(it2, ir)
-        v11 = _val(it2, ir2)
+        v00 = table[it, ir]
+        v01 = table[it, ir + 1]
+        v10 = table[it + 1, ir]
+        v11 = table[it + 1, ir + 1]
 
         # Interpolation fractions
-        dr = radii[ir2] - radii[ir]
-        t_r = (r_c - radii[ir]) / dr if dr > 1e-12 else 0.0
-
-        dt = thetas[it2] - thetas[it]
-        t_t = (theta_c - thetas[it]) / dt if dt > 1e-12 else 0.0
+        dr = radii[ir + 1] - radii[ir]
+        t_r = np.where(dr > 1e-12, (r_c - radii[ir]) / dr, 0.0)
+        dt = thetas[it + 1] - thetas[it]
+        t_t = np.where(dt > 1e-12, (theta_c - thetas[it]) / dt, 0.0)
 
         # Bilinear
         top = v00 * (1.0 - t_r) + v01 * t_r
         bot = v10 * (1.0 - t_r) + v11 * t_r
         return top * (1.0 - t_t) + bot * t_t
 
+    def dose_at_points(self, angle_deg, radius_cm):
+        """Vectorized TG-43U1 dose for arrays of (angle_deg, radius_cm); returns cGy array."""
+        theta = np.mod(np.asarray(angle_deg, dtype=np.float64), 360.0)
+        theta = np.where(theta > 180.0, 360.0 - theta, theta)
+        theta = np.where(theta > 90.0, 180.0 - theta, theta)
+        theta = np.clip(theta, 0.0, 90.0)
+        r = np.clip(np.asarray(radius_cm, dtype=np.float64), 0.041, 10.0)
+
+        GL = self._geometry_factor_vec(r, theta)
+        gL = self._radial_dose(r)
+        F = self._anisotropy(r, theta)
+        rate = self._LAMBDA * (GL / self._GL_ref) * gL * F
+        return self.DOSE_CONVERSION_FACTOR * np.maximum(0.0, rate)
 
     def dose_at_point(self, angle_deg, radius_cm):
-        """TG-43U1 dose at a point, returns cGy."""
-        angle_deg = angle_deg % 360
-        if angle_deg > 180:
-            angle_deg = 360 - angle_deg
-        if angle_deg > 90:
-            angle_deg = 180 - angle_deg
-
-        angle_deg = float(np.clip(angle_deg, 0, 90))
-        radius_cm_eff = float(np.clip(radius_cm, 0.041, 10.0))
-
-        rate = self._tg43_dose_rate(angle_deg, radius_cm_eff)
-        return self.DOSE_CONVERSION_FACTOR * max(0.0, rate)
-
-    def _tg43_dose_rate(self, theta_deg, r):
-        """Core TG-43U1 2D calculation: Lambda * [G_L(r,theta)/G_L(r0,theta0)] * g_L(r) * F(r,theta)."""
-        GL = self._geometry_factor(r, theta_deg)
-        gL = self._radial_dose(r)
-        F = self._anisotropy(r, theta_deg)
-        return self._LAMBDA * (GL / self._GL_ref) * gL * F
+        """TG-43U1 dose at a single point, returns cGy."""
+        return float(self.dose_at_points(np.array([angle_deg], dtype=np.float64),
+                                         np.array([radius_cm], dtype=np.float64))[0])
 
 
 class GammaTilePlacement:
@@ -217,30 +238,31 @@ class GammaTilePlacement:
         self.seed_axis_ras = self.frame @ self.seed_axis_local  # Transform to RAS
         self.seed_axis_ras = self.seed_axis_ras / (np.linalg.norm(self.seed_axis_ras) + 1e-6)  # Normalize
     
+    def dose_at_points(self, points_ras, interpolator):
+        """Vectorized total dose from all 4 seeds at an (N, 3) array of RAS points; returns (N,) cGy."""
+        points = np.asarray(points_ras, dtype=np.float64)
+        total_dose = np.zeros(points.shape[0], dtype=np.float64)
+        seed_axis = np.asarray(self.seed_axis_ras, dtype=np.float64)
+
+        for seed_pos in self.seed_positions_ras:
+            relative = points - np.asarray(seed_pos, dtype=np.float64)
+            r_total = np.linalg.norm(relative, axis=1)
+            valid = (r_total >= self.SEED_DIAMETER_MM / 2.0) & (r_total <= 100)
+            if not np.any(valid):
+                continue
+            rel = relative[valid]
+            r_parallel = rel @ seed_axis
+            r_perp = np.linalg.norm(rel - r_parallel[:, None] * seed_axis, axis=1)
+            theta_deg = np.degrees(np.arctan2(r_perp, np.abs(r_parallel)))
+            r_cm = r_total[valid] / 10.0
+            total_dose[valid] += interpolator.dose_at_points(theta_deg, r_cm)
+
+        return total_dose
+
     def dose_at_point(self, point_ras, interpolator):
         """Total dose from all 4 seeds, TG-43 polar angle from seed axis."""
-        total_dose = 0.0
-        point = np.array(point_ras)
-        
-        seed_axis = self.seed_axis_ras
-        
-        for seed_pos in self.seed_positions_ras:
-            # Vector from seed center to calculation point
-            relative = point - seed_pos
-            r_total = np.linalg.norm(relative)
-
-            if r_total < self.SEED_DIAMETER_MM / 2.0 or r_total > 100:
-                continue
-            r_parallel = np.dot(relative, seed_axis)
-            r_perp_vec = relative - r_parallel * seed_axis
-            r_perp = np.linalg.norm(r_perp_vec)
-            theta_rad = np.arctan2(r_perp, abs(r_parallel))
-            theta_deg = np.degrees(theta_rad)
-            r_cm = r_total / 10.0
-            dose = interpolator.dose_at_point(theta_deg, r_cm)
-            total_dose += dose
-        
-        return total_dose
+        return float(self.dose_at_points(np.asarray(point_ras, dtype=np.float64).reshape(1, 3),
+                                         interpolator)[0])
 
 
 class SingleSeedPlacement:
@@ -255,20 +277,29 @@ class SingleSeedPlacement:
         # Seed longitudinal axis = normal (seed oriented along surface normal)
         self.seed_axis_ras = self.normal.copy()
 
+    def dose_at_points(self, points_ras, interpolator):
+        """Vectorized dose from this single seed at an (N, 3) array of RAS points; returns (N,) cGy."""
+        points = np.asarray(points_ras, dtype=np.float64)
+        total_dose = np.zeros(points.shape[0], dtype=np.float64)
+        seed_axis = np.asarray(self.seed_axis_ras, dtype=np.float64)
+
+        relative = points - np.asarray(self.center, dtype=np.float64)
+        r_total = np.linalg.norm(relative, axis=1)
+        valid = (r_total >= GammaTilePlacement.SEED_DIAMETER_MM / 2.0) & (r_total <= 100)
+        if np.any(valid):
+            rel = relative[valid]
+            r_parallel = rel @ seed_axis
+            r_perp = np.linalg.norm(rel - r_parallel[:, None] * seed_axis, axis=1)
+            theta_deg = np.degrees(np.arctan2(r_perp, np.abs(r_parallel)))
+            r_cm = r_total[valid] / 10.0
+            total_dose[valid] = interpolator.dose_at_points(theta_deg, r_cm)
+
+        return total_dose
+
     def dose_at_point(self, point_ras, interpolator):
         """Dose from this single seed at point_ras (TG-43)."""
-        point = np.array(point_ras)
-        relative = point - self.center
-        r_total = np.linalg.norm(relative)
-        if r_total < GammaTilePlacement.SEED_DIAMETER_MM / 2.0 or r_total > 100:
-            return 0.0
-        r_parallel = np.dot(relative, self.seed_axis_ras)
-        r_perp_vec = relative - r_parallel * self.seed_axis_ras
-        r_perp = np.linalg.norm(r_perp_vec)
-        theta_rad = np.arctan2(r_perp, abs(r_parallel))
-        theta_deg = np.degrees(theta_rad)
-        r_cm = r_total / 10.0
-        return interpolator.dose_at_point(theta_deg, r_cm)
+        return float(self.dose_at_points(np.asarray(point_ras, dtype=np.float64).reshape(1, 3),
+                                         interpolator)[0])
 
 
 class GammaTileDosimetry:
@@ -319,24 +350,29 @@ class GammaTileDosimetry:
         y_coords = np.arange(bounds_ras[1][0], bounds_ras[1][1] + spacing_mm, spacing_mm)[:dims[1]]
         z_coords = np.arange(bounds_ras[2][0], bounds_ras[2][1] + spacing_mm, spacing_mm)[:dims[2]]
 
-        max_dist_sq = max_distance_mm ** 2
+        # All voxel centers as one (N, 3) array, in volume[i, j, k] order
+        X, Y, Z = np.meshgrid(x_coords, y_coords, z_coords, indexing='ij')
+        points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
 
-        for i in range(dims[0]):
-            for j in range(dims[1]):
-                for k in range(dims[2]):
-                    ras = np.array([x_coords[i], y_coords[j], z_coords[k]])
-                    min_dist_sq = float('inf')
-                    for tile in self.tiles:
-                        dist_sq = np.sum((ras - tile.center) ** 2)
-                        min_dist_sq = min(min_dist_sq, dist_sq)
-                    for seed in self.seeds:
-                        dist_sq = np.sum((ras - seed.center) ** 2)
-                        min_dist_sq = min(min_dist_sq, dist_sq)
-                    if min_dist_sq <= max_dist_sq:
-                        for tile in self.tiles:
-                            volume[i, j, k] += tile.dose_at_point(ras, self.interpolator)
-                        for seed in self.seeds:
-                            volume[i, j, k] += seed.dose_at_point(ras, self.interpolator)
+        # Mask: voxels within max_distance_mm of any tile/seed center
+        max_dist_sq = max_distance_mm ** 2
+        min_dist_sq = np.full(points.shape[0], np.inf)
+        for source in list(self.tiles) + list(self.seeds):
+            center = np.asarray(source.center, dtype=np.float64)
+            dist_sq = np.sum((points - center) ** 2, axis=1)
+            np.minimum(min_dist_sq, dist_sq, out=min_dist_sq)
+        mask = min_dist_sq <= max_dist_sq
+
+        if np.any(mask):
+            active_points = points[mask]
+            dose = np.zeros(active_points.shape[0], dtype=np.float64)
+            for tile in self.tiles:
+                dose += tile.dose_at_points(active_points, self.interpolator)
+            for seed in self.seeds:
+                dose += seed.dose_at_points(active_points, self.interpolator)
+            flat = np.zeros(points.shape[0], dtype=np.float32)
+            flat[mask] = dose.astype(np.float32)
+            volume = flat.reshape(dims)
 
         self.dose_volume = volume
         return volume, spacing_mm, dims, bounds_ras
@@ -462,7 +498,9 @@ class BrainSurfaceGenerator:
         binary_image.SetOrigin(imageData.GetOrigin())
         binary_image.GetPointData().SetScalars(binary_vtk)
 
-        marching = vtk.vtkMarchingCubes()
+        # vtkFlyingEdges3D produces the same isosurface as vtkMarchingCubes
+        # but is dramatically faster (parallel edge-based algorithm)
+        marching = vtk.vtkFlyingEdges3D() if hasattr(vtk, 'vtkFlyingEdges3D') else vtk.vtkMarchingCubes()
         marching.SetInputData(binary_image)
         marching.SetValue(0, 0.5)
         marching.Update()
@@ -483,15 +521,32 @@ class BrainSurfaceGenerator:
     
     @staticmethod
     def add_surface_to_scene(surface, volumeNode, name="BrainSurface"):
-        modelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", name)
-        modelNode.SetAndObservePolyData(surface)
-        
-        # Apply RAS transform from volume
+        # Bake the volume's IJK->RAS transform into the mesh itself. The surface is
+        # extracted in voxel (IJK) space; every downstream query against it
+        # (normal lookup, closest point, ray intersection, penetration limiting,
+        # tile deformation) is made with RAS coordinates, so the stored polydata
+        # must be in RAS rather than displayed through a transform node.
         ijkToRas = vtk.vtkMatrix4x4()
         volumeNode.GetIJKToRASMatrix(ijkToRas)
-        transformNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", f"{name}Transform")
-        transformNode.SetMatrixTransformToParent(ijkToRas)
-        modelNode.SetAndObserveTransformNodeID(transformNode.GetID())
+        transform = vtk.vtkTransform()
+        transform.SetMatrix(ijkToRas)
+        transformFilter = vtk.vtkTransformPolyDataFilter()
+        transformFilter.SetInputData(surface)
+        transformFilter.SetTransform(transform)
+        transformFilter.Update()
+        surface_ras = transformFilter.GetOutput()
+        if ijkToRas.Determinant() < 0:
+            # A mirroring transform (e.g. LPS->RAS axis flips) reverses triangle
+            # winding; restore it so cell normals keep pointing outward.
+            reverse = vtk.vtkReverseSense()
+            reverse.SetInputData(surface_ras)
+            reverse.ReverseCellsOn()
+            reverse.ReverseNormalsOff()
+            reverse.Update()
+            surface_ras = reverse.GetOutput()
+
+        modelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", name)
+        modelNode.SetAndObservePolyData(surface_ras)
         
         displayNode = modelNode.GetDisplayNode()
         if displayNode is None:
@@ -527,7 +582,7 @@ class IsodoseSurfaceGenerator:
         image.SetOrigin(0, 0, 0)
         image.GetPointData().SetScalars(volume_vtk)
 
-        contour = vtk.vtkMarchingCubes()
+        contour = vtk.vtkFlyingEdges3D() if hasattr(vtk, 'vtkFlyingEdges3D') else vtk.vtkMarchingCubes()
         contour.SetInputData(image)
         contour.SetValue(0, float(dose_level))
         # Enable all regions to ensure we get surfaces even for large/low dose regions
@@ -614,6 +669,7 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
     def setup(self):
         super().setup()
         self.logic = GammaTileDosimetry()
+        self._volume_array_cache = {}  # volumeNode ID -> ((image MTime, node MTime), (numpy array, dims, rasToIjk))
         self.placing = False
         self.placing_seeds = False
         self.brain_surface_model = None
@@ -1547,12 +1603,7 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
 
         current_points = polydata.GetPoints()
         if current_points and current_points.GetNumberOfPoints() > 0:
-            current_center = np.zeros(3)
-            num_points = current_points.GetNumberOfPoints()
-            for i in range(num_points):
-                pt = current_points.GetPoint(i)
-                current_center += np.array(pt)
-            current_center /= num_points
+            current_center = numpy_support.vtk_to_numpy(current_points.GetData()).mean(axis=0)
 
             translation = tile.center - current_center
 
@@ -1637,12 +1688,7 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
         if not points or points.GetNumberOfPoints() == 0:
             return
         
-        geometric_center = np.zeros(3)
-        num_points = points.GetNumberOfPoints()
-        for i in range(num_points):
-            pt = points.GetPoint(i)
-            geometric_center += np.array(pt)
-        geometric_center /= num_points
+        geometric_center = numpy_support.vtk_to_numpy(points.GetData()).mean(axis=0)
         
         transform = vtk.vtkTransform()
         transform.PostMultiply()
@@ -1660,11 +1706,7 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
         new_polydata = transformFilter.GetOutput()
 
         new_points = new_polydata.GetPoints()
-        new_center = np.zeros(3)
-        for i in range(num_points):
-            pt = new_points.GetPoint(i)
-            new_center += np.array(pt)
-        new_center /= num_points
+        new_center = numpy_support.vtk_to_numpy(new_points.GetData()).mean(axis=0)
 
         drift = tile.center - new_center
         if np.linalg.norm(drift) > 1e-6:
@@ -2032,24 +2074,81 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
         except Exception as e:
             self.statusLabel.setText(f"Error: {str(e)}")
     
+    def _getVolumeSamplingData(self, volumeNode):
+        """Cached (numpy scalars indexed [k, j, i], dims, rasToIjk 4x4 numpy) for fast volume sampling."""
+        imageData = volumeNode.GetImageData()
+        if not imageData:
+            return None
+        scalars = imageData.GetPointData().GetScalars()
+        if not scalars:
+            return None
+        # Key on both the pixel data and the node itself so geometry changes
+        # (origin/spacing/IJKToRAS edits, hardened transforms) invalidate the cache.
+        cache_key = (imageData.GetMTime(), volumeNode.GetMTime())
+        cached = self._volume_array_cache.get(volumeNode.GetID())
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        dims = imageData.GetDimensions()
+        np_array = numpy_support.vtk_to_numpy(scalars).reshape(dims[::-1])
+        ijkToRas = vtk.vtkMatrix4x4()
+        volumeNode.GetIJKToRASMatrix(ijkToRas)
+        rasToIjk_vtk = vtk.vtkMatrix4x4()
+        vtk.vtkMatrix4x4.Invert(ijkToRas, rasToIjk_vtk)
+        rasToIjk = np.array([[rasToIjk_vtk.GetElement(r, c) for c in range(4)] for r in range(4)])
+        data = (np_array, dims, rasToIjk)
+        self._volume_array_cache[volumeNode.GetID()] = (cache_key, data)
+        return data
+
+    def _sampleVolumeAtRAS(self, sampling_data, points_ras):
+        """Nearest-neighbor voxel intensities at an (N, 3) array of RAS points.
+        Returns (values, in_bounds_mask); out-of-bounds values are 0."""
+        np_array, dims, rasToIjk = sampling_data
+        pts = np.asarray(points_ras, dtype=np.float64).reshape(-1, 3)
+        homog = np.column_stack([pts, np.ones(pts.shape[0])])
+        ijk = np.rint(homog @ rasToIjk.T[:, :3]).astype(np.int64)
+        in_bounds = ((ijk[:, 0] >= 0) & (ijk[:, 0] < dims[0]) &
+                     (ijk[:, 1] >= 0) & (ijk[:, 1] < dims[1]) &
+                     (ijk[:, 2] >= 0) & (ijk[:, 2] < dims[2]))
+        values = np.zeros(pts.shape[0], dtype=np.float64)
+        ib = ijk[in_bounds]
+        if ib.size:
+            values[in_bounds] = np_array[ib[:, 2], ib[:, 1], ib[:, 0]]
+        return values, in_bounds
+
+    def _buildPointLocator(self, polyData):
+        locator = vtk.vtkStaticPointLocator() if hasattr(vtk, 'vtkStaticPointLocator') else vtk.vtkPointLocator()
+        locator.SetDataSet(polyData)
+        locator.BuildLocator()
+        return locator
+
+    def _getCellLocator(self, polyData):
+        """Cached static cell locator for a polydata (rebuilt only when the mesh changes)."""
+        if not hasattr(self, '_cell_locator_cache'):
+            self._cell_locator_cache = {}
+        key = id(polyData)
+        cached = self._cell_locator_cache.get(key)
+        if cached is not None and cached[0] == polyData.GetMTime():
+            return cached[1]
+        locator = vtk.vtkStaticCellLocator() if hasattr(vtk, 'vtkStaticCellLocator') else vtk.vtkCellLocator()
+        locator.SetDataSet(polyData)
+        locator.BuildLocator()
+        # Keep a reference to polyData so its id() is not reused while cached.
+        # Only the most recent mesh is retained so regenerated surfaces are not leaked.
+        self._cell_locator_cache = {key: (polyData.GetMTime(), locator, polyData)}
+        return locator
+
     def getNormalFromModel(self, modelNode, pos_ras, search_radius=5.0):
         try:
             polyData = modelNode.GetPolyData()
             if not polyData or polyData.GetNumberOfPoints() == 0:
                 return None
 
-            points = polyData.GetPoints()
-            min_dist = float('inf')
-            nearest_idx = -1
-            
-            for i in range(points.GetNumberOfPoints()):
-                pt = points.GetPoint(i)
-                dist = np.linalg.norm(np.array(pt) - pos_ras)
-                if dist < min_dist:
-                    min_dist = dist
-                    nearest_idx = i
-            
-            if nearest_idx < 0 or min_dist > search_radius:
+            locator = self._buildPointLocator(polyData)
+            nearest_idx = locator.FindClosestPoint([float(pos_ras[0]), float(pos_ras[1]), float(pos_ras[2])])
+            if nearest_idx < 0:
+                return None
+            nearest_pt = np.array(polyData.GetPoint(nearest_idx))
+            if np.linalg.norm(nearest_pt - pos_ras) > search_radius:
                 return None
 
             normals = polyData.GetPointData().GetNormals()
@@ -2060,22 +2159,22 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
             return self.computeNormalFromNeighbors(polyData, nearest_idx)
         except:
             return None
-    
+
     def computeNormalFromNeighbors(self, polyData, point_idx, radius=2.0):
         try:
             points = polyData.GetPoints()
             center = np.array(points.GetPoint(point_idx))
-            
-            neighbors = []
-            for i in range(points.GetNumberOfPoints()):
-                pt = np.array(points.GetPoint(i))
-                if np.linalg.norm(pt - center) < radius:
-                    neighbors.append(pt)
-            
-            if len(neighbors) < 3:
+
+            locator = self._buildPointLocator(polyData)
+            neighbor_ids = vtk.vtkIdList()
+            locator.FindPointsWithinRadius(radius, [float(center[0]), float(center[1]), float(center[2])], neighbor_ids)
+            if neighbor_ids.GetNumberOfIds() < 3:
                 return None
 
-            neighbors = np.array(neighbors)
+            all_points = numpy_support.vtk_to_numpy(points.GetData())
+            ids = [neighbor_ids.GetId(i) for i in range(neighbor_ids.GetNumberOfIds())]
+            neighbors = np.asarray(all_points[ids], dtype=np.float64)
+
             centroid = np.mean(neighbors, axis=0)
             centered = neighbors - centroid
 
@@ -2084,7 +2183,7 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
 
             if np.dot(normal, center) < 0:
                 normal = -normal
-            
+
             return normal.astype(np.float32)
         except:
             return None
@@ -2164,70 +2263,36 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
                 tile_center = surface_pos + normal * tile_thickness_half
                 return tile_center
         
-        # Fallback: use volume-based surface detection
-        image = volumeNode.GetImageData()
-        if not image:
+        # Fallback: volume-based surface detection (vectorized ray march on cached array)
+        sampling_data = self._getVolumeSamplingData(volumeNode)
+        if sampling_data is None:
             return np.array(pos_ras, dtype=np.float32)
-        
-        scalars = image.GetPointData().GetScalars()
-        if not scalars:
-            return np.array(pos_ras, dtype=np.float32)
-        
-        current_pos = np.array(pos_ras, dtype=np.float32)
-        ijkToRas = vtk.vtkMatrix4x4()
-        volumeNode.GetIJKToRASMatrix(ijkToRas)
-        rasToIjk = vtk.vtkMatrix4x4()
-        vtk.vtkMatrix4x4.Invert(ijkToRas, rasToIjk)
-        
-        dims = image.GetDimensions()
+
+        pos = np.asarray(pos_ras, dtype=np.float64)
+        normal64 = np.asarray(normal, dtype=np.float64)
         max_steps = int(max_trace / step)
-        
+        tile_thickness_half = GammaTilePlacement.TILE_THICKNESS_MM / 2.0
+
         # Get initial intensity to determine threshold
-        pos_homog = [current_pos[0], current_pos[1], current_pos[2], 1.0]
-        ijk = [0, 0, 0, 0]
-        rasToIjk.MultiplyPoint(pos_homog, ijk)
-        i, j, k = int(round(ijk[0])), int(round(ijk[1])), int(round(ijk[2]))
-        
-        if 0 <= i < dims[0] and 0 <= j < dims[1] and 0 <= k < dims[2]:
-            idx = i + j*dims[0] + k*dims[0]*dims[1]
-            initial_intensity = scalars.GetValue(idx)
-            threshold = max(30, initial_intensity * 0.4)  # Adaptive threshold
-        else:
-            threshold = 50
-        
+        init_val, init_in = self._sampleVolumeAtRAS(sampling_data, pos)
+        threshold = max(30, init_val[0] * 0.4) if init_in[0] else 50  # Adaptive threshold
+
         # Trace inward (opposite to normal) to find brain surface
-        surface_found = False
-        for step_num in range(max_steps):
-            pos_homog = [current_pos[0], current_pos[1], current_pos[2], 1.0]
-            ijk = [0, 0, 0, 0]
-            rasToIjk.MultiplyPoint(pos_homog, ijk)
-            
-            i, j, k = int(round(ijk[0])), int(round(ijk[1])), int(round(ijk[2]))
-            
-            if not (0 <= i < dims[0] and 0 <= j < dims[1] and 0 <= k < dims[2]):
-                break
-            
-            idx = i + j*dims[0] + k*dims[0]*dims[1]
-            intensity = scalars.GetValue(idx)
-            
-            # Stop when entering cavity (low intensity) - found surface boundary
-            if intensity < threshold:
-                surface_found = True
-                # Move back to surface boundary
-                current_pos = current_pos + normal * (step * 0.5)
-                break
-            
-            current_pos = current_pos - normal * step
-        
-        if surface_found:
-            # Position tile center so bottom face sits on surface
-            tile_thickness_half = GammaTilePlacement.TILE_THICKNESS_MM / 2.0
-            tile_center = current_pos + normal * tile_thickness_half
-            return tile_center
-        else:
-            # If surface not found, use original position but adjust for tile thickness
-            tile_thickness_half = GammaTilePlacement.TILE_THICKNESS_MM / 2.0
-            return pos_ras + normal * tile_thickness_half
+        t = np.arange(max_steps, dtype=np.float64) * step
+        samples = pos[None, :] - normal64[None, :] * t[:, None]
+        intensities, in_bounds = self._sampleVolumeAtRAS(sampling_data, samples)
+
+        # Only the contiguous in-bounds prefix is traced (march stops at first out-of-bounds voxel)
+        oob = np.where(~in_bounds)[0]
+        limit = int(oob[0]) if oob.size else max_steps
+        below = np.where(intensities[:limit] < threshold)[0]
+
+        if below.size:
+            # Move back to surface boundary, then position tile so bottom face sits on surface
+            surface_pos = samples[below[0]] + normal64 * (step * 0.5)
+            return (surface_pos + normal64 * tile_thickness_half).astype(np.float32)
+        # If surface not found, use original position but adjust for tile thickness
+        return pos_ras + normal * tile_thickness_half
     
     def findNearestPointOnSurface(self, modelNode, pos_ras, search_radius=10.0):
         try:
@@ -2235,9 +2300,7 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
             if not polyData or polyData.GetNumberOfPoints() == 0:
                 return None
 
-            locator = vtk.vtkCellLocator()
-            locator.SetDataSet(polyData)
-            locator.BuildLocator()
+            locator = self._getCellLocator(polyData)
 
             closestPoint = [0.0, 0.0, 0.0]
             cellId = [0]
@@ -2262,93 +2325,70 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
     def castRayThroughVolume(self, ray_origin, ray_direction, volumeNode, max_distance=100.0):
         """Cast ray through volume; detect surfaces by intensity transitions. Returns [(dist, point, normal, type), ...]."""
         intersections = []
-        
+
         try:
-            imageData = volumeNode.GetImageData()
-            if not imageData:
-                return intersections
-            
-            scalars = imageData.GetPointData().GetScalars()
-            if not scalars:
+            sampling_data = self._getVolumeSamplingData(volumeNode)
+            if sampling_data is None:
                 return intersections
 
-            ijkToRas = vtk.vtkMatrix4x4()
-            volumeNode.GetIJKToRASMatrix(ijkToRas)
-            rasToIjk = vtk.vtkMatrix4x4()
-            vtk.vtkMatrix4x4.Invert(ijkToRas, rasToIjk)
-            
-            dims = imageData.GetDimensions()
+            ray_origin = np.asarray(ray_origin, dtype=np.float64)
+            ray_direction = np.asarray(ray_direction, dtype=np.float64)
 
             step_size = 1.0
             num_steps = int(max_distance / step_size)
-            
-            prev_intensity = None
-            prev_point = None
-
-            sample_points = []
-            for i in range(min(10, num_steps)):
-                t = i * step_size
-                sample_ras = ray_origin + ray_direction * t
-                sample_points.append(sample_ras)
-            
-            intensities = []
-            for sample_ras in sample_points:
-                ras_homog = [sample_ras[0], sample_ras[1], sample_ras[2], 1.0]
-                ijk = [0, 0, 0, 0]
-                rasToIjk.MultiplyPoint(ras_homog, ijk)
-                i, j, k = int(round(ijk[0])), int(round(ijk[1])), int(round(ijk[2]))
-                if 0 <= i < dims[0] and 0 <= j < dims[1] and 0 <= k < dims[2]:
-                    idx = i + j*dims[0] + k*dims[0]*dims[1]
-                    intensities.append(scalars.GetValue(idx))
-            
-            if len(intensities) == 0:
+            if num_steps < 1:
                 return intersections
 
-            mean_intensity = np.mean(intensities)
-            std_intensity = np.std(intensities) if len(intensities) > 1 else 1.0
-            
+            # Sample the whole ray in one vectorized pass on the cached array
+            t = np.arange(num_steps, dtype=np.float64) * step_size
+            points = ray_origin[None, :] + ray_direction[None, :] * t[:, None]
+            values, in_bounds = self._sampleVolumeAtRAS(sampling_data, points)
+
+            # Thresholds from the first few (in-bounds) samples along the ray
+            n_lead = min(10, num_steps)
+            lead_vals = values[:n_lead][in_bounds[:n_lead]]
+            if lead_vals.size == 0:
+                return intersections
+            mean_intensity = np.mean(lead_vals)
+            std_intensity = np.std(lead_vals) if lead_vals.size > 1 else 1.0
+
             cavity_threshold = mean_intensity - 0.5 * std_intensity
             brain_threshold = mean_intensity + 0.3 * std_intensity
             bone_threshold = mean_intensity + 2.0 * std_intensity
 
-            for step in range(num_steps):
-                t = step * step_size
-                point_ras = ray_origin + ray_direction * t
+            # March stops at the first out-of-bounds sample
+            oob = np.where(~in_bounds)[0]
+            limit = int(oob[0]) if oob.size else num_steps
+            if limit < 2:
+                return intersections
+            vals = values[:limit]
 
-                ras_homog = [point_ras[0], point_ras[1], point_ras[2], 1.0]
-                ijk = [0, 0, 0, 0]
-                rasToIjk.MultiplyPoint(ras_homog, ijk)
-                
-                i, j, k = int(round(ijk[0])), int(round(ijk[1])), int(round(ijk[2]))
-                
-                if not (0 <= i < dims[0] and 0 <= j < dims[1] and 0 <= k < dims[2]):
+            prev = vals[:-1]
+            curr = vals[1:]
+            # Transition tests in the same priority order as the original elif chain
+            c1 = (prev >= cavity_threshold) & (curr < cavity_threshold)
+            c2 = ~c1 & (prev < cavity_threshold) & (curr >= brain_threshold)
+            c3 = ~c1 & ~c2 & (prev < brain_threshold) & (curr >= brain_threshold)
+            c4 = ~c1 & ~c2 & ~c3 & (prev >= brain_threshold) & (curr < brain_threshold)
+            c5 = ~c1 & ~c2 & ~c3 & ~c4 & (curr >= bone_threshold)
+
+            for k in np.where(c1 | c2 | c3 | c4 | c5)[0]:
+                t_hit = t[k + 1]
+                if c1[k]:
+                    intersections.append((t_hit, points[k].copy(), -ray_direction.copy(), 'cavity'))
+                elif c2[k]:
+                    intersections.append((t_hit, points[k + 1].copy(), ray_direction.copy(), 'cavity'))
+                elif c3[k]:
+                    intersections.append((t_hit, points[k + 1].copy(), ray_direction.copy(), 'interior'))
+                elif c4[k]:
+                    intersections.append((t_hit, points[k].copy(), -ray_direction.copy(), 'interior'))
+                elif c5[k]:
+                    # A barrier transition terminates the march
+                    intersections.append((t_hit, points[k + 1].copy(), ray_direction.copy(), 'barrier'))
                     break
-                
-                idx = i + j*dims[0] + k*dims[0]*dims[1]
-                intensity = scalars.GetValue(idx)
 
-                if prev_intensity is not None:
-                    if prev_intensity >= cavity_threshold and intensity < cavity_threshold:
-                        intersections.append((t, prev_point.copy(), -ray_direction.copy(), 'cavity'))
-
-                    elif prev_intensity < cavity_threshold and intensity >= brain_threshold:
-                        intersections.append((t, point_ras.copy(), ray_direction.copy(), 'cavity'))
-
-                    elif prev_intensity < brain_threshold and intensity >= brain_threshold:
-                        intersections.append((t, point_ras.copy(), ray_direction.copy(), 'interior'))
-
-                    elif prev_intensity >= brain_threshold and intensity < brain_threshold:
-                        intersections.append((t, prev_point.copy(), -ray_direction.copy(), 'interior'))
-
-                    elif intensity >= bone_threshold:
-                        intersections.append((t, point_ras.copy(), ray_direction.copy(), 'barrier'))
-                        break
-                
-                prev_intensity = intensity
-                prev_point = point_ras.copy()
-            
             return intersections
-            
+
         except Exception as e:
             logger.warning(f"Error casting ray through volume: {e}")
             return []
@@ -2366,9 +2406,7 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
                 try:
                     surfacePolyData = self.brain_surface_model.GetPolyData()
                     if surfacePolyData and surfacePolyData.GetNumberOfPoints() > 0:
-                        locator = vtk.vtkCellLocator()
-                        locator.SetDataSet(surfacePolyData)
-                        locator.BuildLocator()
+                        locator = self._getCellLocator(surfacePolyData)
 
                         tolerance = 0.001
                         points = vtk.vtkPoints()
@@ -2492,9 +2530,8 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
             if not surfacePolyData or surfacePolyData.GetNumberOfPoints() == 0:
                 return polydata
 
-            locator = vtk.vtkCellLocator()
-            locator.SetDataSet(surfacePolyData)
-            locator.BuildLocator()
+            locator = self._getCellLocator(surfacePolyData)
+            fallbackPointLocator = None  # built at most once if the cell-locator API is unavailable
 
             points = polydata.GetPoints()
             numPoints = points.GetNumberOfPoints()
@@ -2561,11 +2598,10 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
                             
                     except (TypeError, AttributeError) as e:
                         try:
-                            pointLocator = vtk.vtkPointLocator()
-                            pointLocator.SetDataSet(surfacePolyData)
-                            pointLocator.BuildLocator()
-                            
-                            closest_point_id = pointLocator.FindClosestPoint(
+                            if fallbackPointLocator is None:
+                                fallbackPointLocator = self._buildPointLocator(surfacePolyData)
+
+                            closest_point_id = fallbackPointLocator.FindClosestPoint(
                                 float(sample_ras[0]), 
                                 float(sample_ras[1]), 
                                 float(sample_ras[2])
@@ -3109,9 +3145,11 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
                 logger.warning("SlicerRT export failed, falling back to CreateDICOMSeries: %s", e)
 
         if not success and hasattr(slicer.modules, 'createdicomseries'):
-            success = self._exportDoseVolumeAsDICOM(exportNode, out_dir, "DOSE", in_gy=(doseNodeGy is not None))
+            # Always write the cGy volume here: integer cGy is exact to 0.01 Gy, whereas an
+            # integer Gy volume would be truncated to whole gray.
+            success = self._exportDoseVolumeAsDICOM(doseNode, out_dir, "DOSE", in_gy=False)
             if success:
-                self.statusLabel.setText(f"Exported dose volume (DICOM) to {os.path.basename(out_dir)}")
+                self.statusLabel.setText(f"Exported dose volume (DICOM series, cGy) to {os.path.basename(out_dir)}")
 
         if not success:
             try:
@@ -3149,7 +3187,9 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
             newImage.GetPointData().SetScalars(arr_vtk)
             doseNodeGy = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "Dose Volume Gy")
             doseNodeGy.SetAndObserveImageData(newImage)
-            doseNodeGy.SetIJKToRASMatrix(doseNodeCgy.GetIJKToRASMatrix())
+            ijkToRas = vtk.vtkMatrix4x4()
+            doseNodeCgy.GetIJKToRASMatrix(ijkToRas)
+            doseNodeGy.SetIJKToRASMatrix(ijkToRas)
             doseNodeGy.SetAttribute("DicomRtImport.DoseVolume", "1")
             shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
             if shNode:
@@ -3163,8 +3203,13 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
             return None
     
     def _exportDoseVolumeAsDICOM(self, volumeNode, directory, filename_prefix, in_gy=False):
-        """Run CreateDICOMSeries CLI for dose volume. Returns True on success.
-        in_gy: if True, volume values are in Gy; if False, in cGy (use rescale 0.01 for Gy output)."""
+        """Write the dose volume as a DICOM Secondary Capture series via the CreateDICOMSeries CLI.
+        Returns True on success.
+
+        Pixel values are stored as 32-bit integers with RescaleSlope 1 in the volume's own
+        units (cGy unless in_gy is True), so the stored numbers are exact to 1 cGy. The CLI
+        in Slicer 5.x divides pixel data by any rescaleSlope it is given but does not write
+        the tag back for these modalities, so a non-unit slope must not be used here."""
         try:
             from datetime import datetime
             now = datetime.now()
@@ -3181,10 +3226,10 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
                 "Study Date": date_str,
                 "Study Time": time_str,
                 "Study Description": "GammaTile",
-                "Modality": "OT",
+                "Modality": "SC",  # CreateDICOMSeries only accepts CT|MR|NM|US|PT|CR|SC
                 "Manufacturer": "GammaTile",
                 "Model": "Export",
-                "Series Description": "GammaTile dose",
+                "Series Description": "GammaTile dose (Gy)" if in_gy else "GammaTile dose (cGy)",
                 "Series Number": "1",
                 "Series Date": date_str,
                 "Series Time": time_str,
@@ -3222,8 +3267,10 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
                 "windowWidth": window_width,
                 "contentDate": tags["Content Date"],
                 "contentTime": tags["Content Time"],
-                "rescaleSlope": "1.0" if in_gy else "0.01",  # 0.01: cGy->Gy; 1.0: already Gy
+                "rescaleSlope": "1.0",
                 "rescaleIntercept": "0",
+                # 32-bit integer pixels: cGy values near the seeds exceed the 16-bit range.
+                "Type": "Int",
                 "studyInstanceUID": tags["Study Instance UID"],
                 "seriesInstanceUID": tags["Series Instance UID"],
                 "frameOfReferenceUID": tags.get("Frame of Reference UID", ""),
@@ -3417,6 +3464,8 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
 class GammaTileLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         super().__init__()
+
+
 class GammaTile(GammaTileModule):
     """Required entry-point class so Slicer can instantiate the module."""
     def __init__(self, parent):
