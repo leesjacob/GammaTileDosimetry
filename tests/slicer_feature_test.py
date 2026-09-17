@@ -199,6 +199,11 @@ try:
     js = json.load(open(jsp)) if osmod.path.exists(jsp) else {}
     record("export_csv", len(csv_lines) > 1 + 4*len(w.logic.tiles) + len(w.logic.seeds) - 1, f"{len(csv_lines)} lines; header='{csv_lines[0][:80] if csv_lines else ''}'")
     record("export_json", isinstance(js, dict) and js, f"keys={list(js.keys())[:8]}")
+    interp = w.logic.interpolator
+    record("dosimetry_dataset", interp.dataset == "TG43U1S2" and js.get("dosimetry_dataset") == interp.dataset_name
+           and csv_lines[0].startswith("dosimetry_dataset,"), f"dataset='{interp.dataset_name}', in JSON={js.get('dosimetry_dataset')!r}, CSV first line='{csv_lines[0] if csv_lines else ''}'")
+    ref = interp.DOSE_CONVERSION_FACTOR * 1.056  # theta=90, r=1 cm: G/G_ref = g_L = F = 1
+    record("dose_reference_point", abs(interp.dose_at_point(90.0, 1.0) - ref) < 1e-6 * ref, f"dose(90 deg, 1 cm)={interp.dose_at_point(90.0, 1.0):.4f} cGy, expected {ref:.4f}")
     gy = w._createDoseVolumeInGy(dn)
     gy_arr = slicer.util.arrayFromVolume(gy) if gy else None
     record("dose_gy_conversion", gy is not None and abs(np.nanmax(gy_arr)*100 - np.nanmax(darr)) < 1.0, f"max Gy={np.nanmax(gy_arr) if gy is not None else 'n/a'}")

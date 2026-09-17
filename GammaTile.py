@@ -24,24 +24,80 @@ logger = logging.getLogger(__name__)
 
 
 class DoseInterpolator:
-    """TG-43U1 2D formalism for IsoRay Proxcelan CS-1 Rev2 (L=0.40 cm)."""
+    """TG-43U1 2D formalism for IsoRay Proxcelan CS-1 Rev2 (L=0.40 cm).
+
+    Two dosimetry datasets are built in; DATASET selects which one is used:
+
+    * "TG43U1S2" (default): AAPM/GEC-ESTRO consensus data from TG-43U1S2,
+      Rivard et al., Med. Phys. 44(9):e297-e338 (2017), doi:10.1002/mp.12430.
+      Lambda and L from Table AI, g_L(r) from Table AII (line-source column
+      "IsoRay CS-1 Rev2"), F(r, theta) from Table AXIII.
+    * "CLRP_V2": CLRP TG-43 parameter database v2 (2019) egs_brachy Monte Carlo
+      data for the same source (polynomial g_L fit and 32x12 F table).
+    """
+
+    DATASET = "TG43U1S2"  # or "CLRP_V2"
+    DATASET_NAMES = {
+        "TG43U1S2": "TG-43U1S2 consensus (Rivard et al. 2017)",
+        "CLRP_V2": "CLRP TG-43 v2 (2019)",
+    }
 
     DOSE_CONVERSION_FACTOR = 335.23 * 3.5  # cGy per air kerma strength; math was derived
-    _LAMBDA = 1.056 #Dose rate constant (cGy h^-1 U^-1)
-    _L = 0.40 # Active source length (cm)
-    # g_L(r) = (a0*r^-2 + a1*r^-1 + a2 + a3*r + a4*r^2 + a5*r^3) * exp(-a6*r)
-    _GR_COEFFS = np.array([7.38e-04, -1.198e-02, 9.991e-01, 4.979e-01,
-                           1.07e-02, 1.39e-03, 4.055e-01])
+    _LAMBDA = 1.056 #Dose rate constant (cGy h^-1 U^-1), TG-43U1S2 Table AI
+    _L = 0.40 # Active source length (cm), TG-43U1S2 Table AI
+
+    # ---- TG-43U1S2 consensus dataset ----
+    # CONg_L(r), Table AII (line-source approximation), linearly interpolated in r
+    _CON_GL_RADII = np.array([
+        0.10, 0.15, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00, 3.00, 4.00,
+        5.00, 6.00, 7.00, 8.00, 9.00, 10.00
+    ], dtype=np.float64)
+    _CON_GL_VALUES = np.array([
+        0.960, 0.971, 0.989, 1.006, 1.009, 1.000, 0.962, 0.908, 0.777, 0.642,
+        0.518, 0.411, 0.323, 0.251, 0.1931, 0.1481
+    ], dtype=np.float64)
+    # CONF(r, theta), Table AXIII. Entries at r = 0.1 cm are not tabulated for
+    # theta <= 20 deg (np.nan, filled from the nearest tabulated radius). A row at
+    # 90 deg (F = 1 by definition) anchors interpolation up to the polar-angle clip.
+    _CON_F_THETAS = np.array([
+        0, 2, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90
+    ], dtype=np.float64)
+    _CON_F_RADII = np.array([
+        0.10, 0.25, 0.50, 0.70, 1.00, 2.00, 3.00, 5.00, 7.00, 10.00
+    ], dtype=np.float64)
+    _CON_F_TABLE = np.array([
+        #  0.10    0.25   0.50   0.70   1.00   2.00   3.00   5.00   7.00  10.00
+        [np.nan, 0.622, 0.829, 0.851, 0.845, 0.837, 0.838, 0.843, 0.853, 0.833],  # 0
+        [np.nan, 0.670, 0.796, 0.806, 0.818, 0.839, 0.842, 0.846, 0.845, 0.847],  # 2
+        [np.nan, 0.731, 0.781, 0.761, 0.750, 0.764, 0.780, 0.800, 0.810, 0.819],  # 5
+        [np.nan, 0.730, 0.718, 0.706, 0.713, 0.746, 0.769, 0.794, 0.808, 0.816],  # 7
+        [np.nan, 0.707, 0.678, 0.690, 0.709, 0.752, 0.776, 0.801, 0.815, 0.826],  # 10
+        [np.nan, 0.759, 0.720, 0.734, 0.753, 0.791, 0.811, 0.831, 0.840, 0.847],  # 15
+        [np.nan, 0.843, 0.778, 0.788, 0.803, 0.832, 0.847, 0.862, 0.868, 0.871],  # 20
+        [ 1.161, 0.887, 0.828, 0.834, 0.845, 0.866, 0.876, 0.886, 0.891, 0.896],  # 25
+        [ 1.113, 0.915, 0.868, 0.870, 0.878, 0.894, 0.902, 0.910, 0.912, 0.916],  # 30
+        [ 1.031, 0.949, 0.923, 0.923, 0.926, 0.935, 0.939, 0.943, 0.944, 0.944],  # 40
+        [ 1.009, 0.971, 0.958, 0.957, 0.959, 0.963, 0.964, 0.966, 0.967, 0.966],  # 50
+        [ 1.002, 0.985, 0.978, 0.978, 0.980, 0.981, 0.982, 0.982, 0.982, 0.983],  # 60
+        [ 1.000, 0.993, 0.990, 0.991, 0.992, 0.993, 0.993, 0.993, 0.993, 0.992],  # 70
+        [ 1.000, 0.998, 0.998, 0.997, 0.998, 0.999, 0.999, 0.999, 0.999, 0.998],  # 80
+        [ 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 90
+    ], dtype=np.float64)
+
+    # ---- CLRP TG-43 v2 (2019) dataset ----
+    # g_L(r) = (a0*r^-2 + a1*r^-1 + a2 + a3*r + a4*r^2 + a5*r^3) * exp(-a6*r), fit valid 0.05-10 cm
+    _CLRP_GR_COEFFS = np.array([7.38e-04, -1.198e-02, 9.991e-01, 4.979e-01,
+                                1.07e-02, 1.39e-03, 4.055e-01])
     # Anisotropy table F(r, theta) — V2 (2019) Proxcelan CS-1 Rev2
-    _F_THETAS = np.array([
+    _CLRP_F_THETAS = np.array([
         0, 1, 2, 3, 5, 7, 10, 12, 15, 20, 25, 30, 35, 40, 45,
         50, 55, 60, 65, 70, 73, 75, 78, 80, 82, 84, 85, 86, 87, 88, 89, 90
     ], dtype=np.float64)
 
-    _F_RADII = np.array([
+    _CLRP_F_RADII = np.array([
         0.10, 0.15, 0.25, 0.50, 0.75, 1.00, 2.00, 3.00, 4.00, 5.00, 7.50, 10.00
     ], dtype=np.float64)
-    _F_TABLE = np.array([
+    _CLRP_F_TABLE = np.array([
         #  0.10   0.15   0.25   0.50   0.75   1.00   2.00   3.00   4.00   5.00   7.50  10.00
         [  np.nan, np.nan, 0.617, 0.883, 0.903, 0.900, 0.889, 0.884, 0.882, 0.882, 0.880, 0.874],  # 0
         [  np.nan, np.nan, 0.648, 0.864, 0.890, 0.893, 0.891, 0.889, 0.887, 0.885, 0.879, 0.875],  # 1
@@ -77,7 +133,19 @@ class DoseInterpolator:
         [  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 90
     ], dtype=np.float64)
 
-    def __init__(self):
+    def __init__(self, dataset=None):
+        self.dataset = dataset or self.DATASET
+        if self.dataset not in self.DATASET_NAMES:
+            raise ValueError(f"Unknown dosimetry dataset {self.dataset!r}; expected one of {list(self.DATASET_NAMES)}")
+        self.dataset_name = self.DATASET_NAMES[self.dataset]
+        if self.dataset == "TG43U1S2":
+            self._F_THETAS = self._CON_F_THETAS
+            self._F_RADII = self._CON_F_RADII
+            self._F_TABLE = self._CON_F_TABLE
+        else:
+            self._F_THETAS = self._CLRP_F_THETAS
+            self._F_RADII = self._CLRP_F_RADII
+            self._F_TABLE = self._CLRP_F_TABLE
         # Precompute reference geometry factor G_L(r0=1.0, theta0=90°)
         self._GL_ref = self._geometry_factor(1.0, 90.0)
         # NaN-free copy of the anisotropy table so lookups can be vectorized.
@@ -133,9 +201,14 @@ class DoseInterpolator:
         return np.where(np.abs(theta_deg) < 0.01, 1.0 / denom, G)
 
     def _radial_dose(self, r):
-        # g_L(r) — Eq. 3 from TG-43U1, polynomial fit from CLRP v2 (vectorized)
+        """Radial dose function g_L(r) for arrays of r (cm)."""
+        if self.dataset == "TG43U1S2":
+            # Linear interpolation on the tabulated consensus values; held constant
+            # below 0.10 cm and above 10 cm (np.interp clamps to the end values).
+            return np.interp(np.asarray(r, dtype=np.float64), self._CON_GL_RADII, self._CON_GL_VALUES)
+        # CLRP v2 modified-polynomial fit (vectorized), valid 0.05-10 cm
         r = np.clip(r, 0.05, 10.0)
-        a = self._GR_COEFFS
+        a = self._CLRP_GR_COEFFS
         return (a[0] * r**-2 + a[1] * r**-1 + a[2] + a[3] * r
                 + a[4] * r**2 + a[5] * r**3) * np.exp(-a[6] * r)
 
@@ -2958,6 +3031,7 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
         print(f"Maximum computed dose: {max_dose:.1f} cGy")
         print(f"Number of tiles: {num_tiles}")
         print(f"Number of standalone seeds: {num_seeds}")
+        print(f"Dosimetry dataset: {self.logic.interpolator.dataset_name}")
         print(f"Dose volume dimensions: {dims[0]} x {dims[1]} x {dims[2]}")
         print(f"Spacing: {spacing:.2f} mm")
         print(f"Volume bounds (RAS):")
@@ -3015,6 +3089,8 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
         """Write tile and seed positions to CSV (consistent with onUpdate log)."""
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
+            w.writerow(["dosimetry_dataset", self.logic.interpolator.dataset_name])
+            w.writerow([])
             w.writerow(["tile_index", "seed_index", "x_ras_mm", "y_ras_mm", "z_ras_mm", "x_local_mm", "y_local_mm", "z_local_mm"])
             for tile_idx, tile in enumerate(self.logic.tiles):
                 for seed_idx, seed_pos in enumerate(tile.seed_positions_ras):
@@ -3101,6 +3177,7 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
             json.dump({
                 "tiles": tiles_data,
                 "standalone_seeds": standalone_seeds_data,
+                "dosimetry_dataset": self.logic.interpolator.dataset_name,
                 "isodose_surface_bounds": isodose_data
             }, f, indent=2)
     
