@@ -1,0 +1,45 @@
+"# GammaView headless Slicer feature test (tests/slicer_feature_test.py), Slicer 5.12.1, synthetic brain volume"
+# checks,42,passed,42,failed,0
+check,result,detail
+module_load,PASS,loadModules=True
+module_title,PASS,GammaView Dosimetry
+widget_instance,PASS,GammaTileWidget
+logic_class,PASS,slicer.modules.GammaTileWidget=GammaTileWidget
+volume_selected,PASS,Volume selected: SyntheticBrain
+brain_surface,PASS,24104 pts in 0.04s; status='Brain surface created successfully!'
+brain_surface_geometry,PASS,median outer radius 70.02 mm (mesh stored in RAS)
+brain_surface_no_transform_node,PASS,"parent transform=None, linear transform nodes in scene=3"
+normal_from_model,PASS,normal=[ 0.  0. -1.]
+tile_place_3d_path,PASS,center=[  0.    0.  -72.1] pen=0.00 counter='Tiles: 1  |  Seeds: 0'
+tile_sits_on_surface,PASS,|center|=72.10 (expect ~70+2)
+placement_mode_flags,PASS,placing=True tag=215
+tile_place_3d_click,PASS,tiles 1->2; status='Tile 2 placed. Click to place another tile.'
+tile_place_slice_click,PASS,tiles 2->3; center=[  0.    0.  -74.1] normal=[-1.  0.  0.]; status='Tile 3 placed on interior wall from Red slice. Click to place another tile.'
+seeds_mode_flags,PASS,placing=True seeds=True
+seed_place_slice_click,PASS,seeds 0->1; status='Seed 1 placed from Red slice. Click to place another.'
+cursor_mode_flags,PASS,
+tile_select_slice,PASS,selected=2 from Yellow; label='Selected: Tile 3 (from Yellow view)'
+tile_rotate,PASS,"seed axis rotated 10.0 deg, normal unchanged; status='Tile 3 rotated 10.0° clockwise'"
+tile_rotate_back,PASS,counterclockwise restores axis
+tile_translate,PASS,moved 2.00 mm; status='Tile 3 translated right by 2.0mm'
+seed_select_slice,PASS,selected seed=0
+seed_translate,PASS,moved 2.00 mm
+dose_update,PASS,"max=86594.1953125 cGy, dims=(96, 96, 96) in 0.41s; status='Tiles: 3, Seeds: 1, Max dose: 86594.2 cGy, 3D Isodoses: 3'"
+isodose_surfaces,PASS,"3 isodose nodes: [('Isodose3D_100%_6000cGy', 1388), ('Isodose3D_90%_5400cGy', 1484), ('Isodose3D_50%_3000cGy', 2520)]"
+dose_legend,PASS,4 legend layout entries (header + 3 levels)
+dose_volume_geometry,PASS,dose bounds=[-96.  96. -96.  96. -96.  96.] vol bounds=[-96.  96. -96.  96. -96.  96.]
+dose_update_repeat,PASS,second update 0.41s; scalar volumes in scene=2
+export_csv,PASS,"28 lines; header='dosimetry_dataset,TG-43U1S2 consensus (Rivard et al. 2017)'"
+export_json,PASS,"keys=['tiles', 'standalone_seeds', 'dosimetry_dataset', 'isodose_surface_bounds']"
+dosimetry_dataset,PASS,"dataset='TG-43U1S2 consensus (Rivard et al. 2017)', in JSON='TG-43U1S2 consensus (Rivard et al. 2017)', CSV first line='dosimetry_dataset,TG-43U1S2 consensus (Rivard et al. 2017)'"
+dose_reference_point,PASS,"dose(90 deg, 1 cm)=1239.0101 cGy, expected 1239.0101"
+dose_gy_conversion,PASS,max Gy=865.9419555664062
+export_dicom,PASS,"ok=True, 96 files (expect 96 slices)"
+export_dicom_readback,PASS,Modality=SC RescaleSlope=1.0 Bits=32 SeriesDescription='GammaTile dose (cGy)' pixel max=86594.0 (dose max 86594.2 cGy)
+export_nrrd,PASS,447304 bytes
+undo_tile_and_seed,PASS,"tiles 3->2 (models 2), seeds 1->0 (models 0)"
+ray_cast_volume,PASS,"5 transitions: [(np.float64(5.0), 'cavity'), (np.float64(6.0), 'cavity'), (np.float64(9.0), 'cavity'), (np.float64(18.0), 'interior'), (np.float64(21.0), 'barrier')]"
+sampling_cache_invalidates_on_geometry,PASS,rasToIjk changed after origin edit: True
+sampling_cache_reuses,PASS,same object returned when nothing changed
+cell_locator_cache_single_entry,PASS,1 cached locators
+cleanup,PASS,cleanup() ran without exception

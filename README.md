@@ -168,6 +168,19 @@ Two independent checks were run on this version.
 
 **Dataset checks.** With `DATASET = "CLRP_V2"` the interpolator is bit-identical to the version that shipped before the consensus data were added. With `DATASET = "TG43U1S2"` the radial dose function returns the 16 tabulated CONg_L values exactly, the anisotropy function returns all 143 tabulated CONF entries exactly, F(r, 90°) = 1 for all r, and the dose at the reference point (θ = 90°, r = 1 cm) equals Λ × C.
 
+**TG-43 QA check against the published dose-rate table.** `tests/tg43_qa_check.py` evaluates the engine at every (r, θ) of Table XII, the dose rate per unit source strength (cGy h⁻¹ U⁻¹) for the CS-1 Rev2 that TG-43U1S2 provides for treatment planning system commissioning. The originally published Table XII was flawed; the script uses the corrected values from the erratum (Rivard et al., Med. Phys. 45(2):971–974, 2018, doi 10.1002/mp.12728). It runs with plain Python, no Slicer needed, and writes a per-point CSV:
+
+```bash
+python3 tests/tg43_qa_check.py
+```
+
+| Dataset | Points | Mean abs. difference | Max abs. difference | Points outside ±2% |
+|---|---|---|---|---|
+| TG43U1S2 (default) | 143 | 0.07% | 0.29% (r = 5 cm, θ = 80°) | 0 |
+| CLRP_V2 | 143 | 1.20% | 7.25% (r = 1 cm, θ = 2°) | 26 |
+
+The consensus engine reproduces the published table to the rounding level of its 3 to 4 significant figures. Results are in `tests/results/tg43_qa_TG43U1S2.csv` and `tests/results/tg43_qa_CLRP_V2.csv`; the feature-test results are in `tests/results/slicer_feature_test_results.csv`.
+
 **Headless feature test inside Slicer.** `tests/slicer_feature_test.py` loads the module through Slicer's module factory, builds a synthetic brain volume, and exercises every feature: brain surface creation, tile placement through the 3D interactor and through slice-view ray casting, seed placement, selection, rotation, translation, dose update (twice), isodose surfaces and legend, CSV and JSON export including the dataset name, the reference-point dose, the Gy conversion, DICOM series export with a pydicom read-back, NRRD export, undo, volume ray casting, cache invalidation and cleanup. It prints one `[TEST] PASS/FAIL` line per check (42 checks) and exits with code 0 when all pass:
 
 ```bash
@@ -182,6 +195,8 @@ Set `GAMMATILE_TEST_OUT` to keep the exported files and `results.json`.
 |---|---|
 | `GammaTile.py` | The Slicer module |
 | `tests/slicer_feature_test.py` | Headless end-to-end test, run inside Slicer |
+| `tests/tg43_qa_check.py` | TG-43 QA check of the dose engine against the erratum Table XII, plain Python |
+| `tests/results/` | CSV output of the two tests from the most recent run |
 | `README.md` | This document |
 
 ## Version notes
