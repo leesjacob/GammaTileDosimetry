@@ -97,7 +97,7 @@ The two datasets agree closely away from the seed axis: g_L within 0.6% out to 6
 
 The polar angle is measured from the seed's longitudinal axis and folded into [0°, 90°]. Radius is clipped to [0.041, 10] cm. Points closer than the seed radius (0.41 mm) to a seed centre, or farther than 100 mm from it, receive no dose from that seed. Negative dose rates are clamped to zero.
 
-**Tile geometry.** A GammaTile is modelled as a 20 × 20 × 4 mm slab with four seeds at (±5, ±5, 0) mm in the tile's local frame, i.e. 5 mm in from each edge at mid-thickness. All four seeds are parallel to the tile's local +X axis, which lies in the tile plane. The tile's local Z axis is the surface normal; the tile centre sits 2 mm above the surface so the bottom face rests on it.
+**Tile geometry.** A GammaTile is modelled as a 20 × 20 × 4 mm slab with four seeds at (±5, ±5, +1) mm in the tile's local frame: 5 mm in from each edge, and 3 mm above the tissue-contacting face (1 mm below the cavity-facing face), matching the device's collagen spacer. All four seeds are parallel to the tile's local +X axis, which lies in the tile plane. The tile's local Z axis is the surface normal; the tile centre sits 2 mm above the surface so the contact face rests on it. In the 3D and slice views the 3 mm tissue-side slab is drawn slightly darker than the 1 mm cavity-side slab so the orientation is visible; a selected tile is shown in a uniform highlight colour.
 
 **Standalone seed geometry.** A standalone seed is 4.5 mm long and 0.82 mm in diameter, with its axis along the surface normal. Its centre is offset half a seed length below the settled surface point so one end touches the surface.
 
@@ -181,7 +181,7 @@ python3 tests/tg43_qa_check.py
 
 The consensus engine reproduces the published table to the rounding level of its 3 to 4 significant figures. Results are in `tests/results/tg43_qa_TG43U1S2.csv` and `tests/results/tg43_qa_CLRP_V2.csv`; the feature-test results are in `tests/results/slicer_feature_test_results.csv`.
 
-**Headless feature test inside Slicer.** `tests/slicer_feature_test.py` loads the module through Slicer's module factory, builds a synthetic brain volume, and exercises every feature: brain surface creation, tile placement through the 3D interactor and through slice-view ray casting, seed placement, selection, rotation, translation, dose update (twice), isodose surfaces and legend, CSV and JSON export including the dataset name, the reference-point dose, the Gy conversion, DICOM series export with a pydicom read-back, NRRD export, undo, volume ray casting, cache invalidation and cleanup. It prints one `[TEST] PASS/FAIL` line per check (42 checks) and exits with code 0 when all pass:
+**Headless feature test inside Slicer.** `tests/slicer_feature_test.py` loads the module through Slicer's module factory, builds a synthetic brain volume, and exercises every feature: brain surface creation, tile placement through the 3D interactor and through slice-view ray casting, seed placement, selection, rotation, translation, dose update (twice), isodose surfaces and legend, CSV and JSON export including the dataset name, the reference-point dose, the Gy conversion, DICOM series export with a pydicom read-back, NRRD export, undo, volume ray casting, cache invalidation and cleanup. It prints one `[TEST] PASS/FAIL` line per check (46 checks) and exits with code 0 when all pass:
 
 ```bash
 /Applications/Slicer.app/Contents/MacOS/Slicer --testing --no-splash --python-script tests/slicer_feature_test.py

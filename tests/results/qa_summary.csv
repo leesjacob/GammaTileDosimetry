@@ -8,8 +8,8 @@ Source,Radial dose function g_L(r),"Consensus table, 16 radii 0.10-10 cm, linear
 Source,Anisotropy function F(r theta),"Consensus table, 14 angles x 10 radii, bilinear interpolation, F(r 90 deg) = 1",TG-43U1S2 Table AXIII
 Source,Air-kerma strength per seed,3.5 U (module default; report the clinical value used),Module constant
 Source,Decay integration,Initial dose rate integrated over complete decay (Cs-131 mean life 335.48 h = 9.689 d / ln 2),Module constant
-Geometry,Tile,"20 x 20 x 4 mm, 4 seeds at (+/-5, +/-5, 0) mm in tile plane, seeds parallel to tile local x axis",Module
-Geometry,Tile placement,Tile center 2 mm above surface (bottom face on surface); penetration capped at 10 mm,Module
+Geometry,Tile,"20 x 20 x 4 mm, 4 seeds at (+/-5, +/-5) mm in plane, seed plane 3 mm from the tissue-contacting face (1 mm from the cavity face), seeds parallel to tile local x axis",Module
+Geometry,Tile placement,Tile center 2 mm above surface (contact face on surface; seeds 3 mm above it); penetration capped at 10 mm,Module
 Geometry,Standalone seed,"4.5 mm long, 0.82 mm diameter, axis along surface normal, one end on surface",Module
 Implementation,Dose grid,2 mm isotropic over volume bounding box,Module
 Implementation,Range truncation,Voxels farther than 50 mm from every source set to zero; per-seed cutoff at 100 mm,Module

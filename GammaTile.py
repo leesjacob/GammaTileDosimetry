@@ -269,7 +269,9 @@ class GammaTilePlacement:
     TILE_LENGTH_MM = 20.0
     TILE_WIDTH_MM = 20.0
     TILE_THICKNESS_MM = 4.0
-    SOURCE_DEPTH_MM = 2.0
+    # Seed plane depth measured from the tissue-contacting face. The collagen spacer
+    # places the seeds 3 mm from the face on the tumor bed and 1 mm from the cavity face.
+    SEED_DEPTH_FROM_CONTACT_MM = 3.0
     SEEDS_PER_TILE = 4
     SEED_EDGE_OFFSET_MM = 5.0
     SEED_SPACING_MM = 10.0
@@ -301,7 +303,9 @@ class GammaTilePlacement:
         tile_half = self.TILE_LENGTH_MM / 2.0
         seed_edge_offset = self.SEED_EDGE_OFFSET_MM
         seed_x_pos = tile_half - seed_edge_offset
-        seed_z_position = 0.0  # Midpoint of 4mm thickness (2mm from each edge)
+        # Local z runs from the contact face (-2 mm) to the cavity face (+2 mm); the seed
+        # plane is 3 mm above the contact face, i.e. z = +1 mm.
+        seed_z_position = -self.TILE_THICKNESS_MM / 2.0 + self.SEED_DEPTH_FROM_CONTACT_MM
         self.seed_positions_local = [
             np.array([-seed_x_pos, -seed_x_pos, seed_z_position], dtype=np.float32),
             np.array([+seed_x_pos, -seed_x_pos, seed_z_position], dtype=np.float32),
@@ -1533,6 +1537,39 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
         seeds_count = len(self.logic.seeds)
         self.tileCounterLabel.setText(f"Tiles: {tiles_count}  |  Seeds: {seeds_count}")
     
+    # Tile colors (RGB 0-1). The tissue-facing 3 mm slab is drawn slightly darker.
+    TILE_COLOR = (1.0, 0.8, 0.0)
+    TILE_TISSUE_SIDE_COLOR = (0.87, 0.67, 0.0)
+    TILE_SHADING_COLOR_NODE_NAME = "GammaTileSideColors"
+
+    def _getTileShadingColorNode(self):
+        """Two-entry color table: index 0 = tissue side (darker), 1 = cavity side."""
+        node = slicer.mrmlScene.GetFirstNodeByName(self.TILE_SHADING_COLOR_NODE_NAME)
+        if node is None or not node.IsA("vtkMRMLColorTableNode"):
+            node = slicer.vtkMRMLColorTableNode()
+            node.SetName(self.TILE_SHADING_COLOR_NODE_NAME)
+            node.SetTypeToUser()
+            node.SetNumberOfColors(2)
+            node.SetColor(0, "Tissue side", *self.TILE_TISSUE_SIDE_COLOR, 1.0)
+            node.SetColor(1, "Cavity side", *self.TILE_COLOR, 1.0)
+            node.SetHideFromEditors(True)
+            slicer.mrmlScene.AddNode(node)
+        return node
+
+    def _applyTileShading(self, displayNode, shaded):
+        """Show the two-tone tile shading (shaded=True) or a uniform display color (False)."""
+        try:
+            if shaded:
+                displayNode.SetAndObserveColorNodeID(self._getTileShadingColorNode().GetID())
+                displayNode.SetActiveScalar("TileSide", vtk.vtkAssignAttribute.CELL_DATA)
+                displayNode.SetScalarRangeFlag(slicer.vtkMRMLDisplayNode.UseManualScalarRange)
+                displayNode.SetScalarRange(0.0, 1.0)
+                displayNode.SetScalarVisibility(True)
+            else:
+                displayNode.SetScalarVisibility(False)
+        except Exception as e:
+            logger.warning(f"Could not apply tile shading: {e}")
+
     def updateTileVisualAppearance(self):
         for idx, tile_node in enumerate(self.logic.fiducial_nodes):
             if idx >= len(self.logic.tiles) or not tile_node:
@@ -1541,6 +1578,8 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
             if not displayNode:
                 continue
             if idx == self.selected_tile_index:
+                # Uniform highlight color replaces the two-tone shading while selected
+                self._applyTileShading(displayNode, shaded=False)
                 displayNode.SetColor(1.0, 0.84, 0.0)
                 displayNode.SetAmbient(1.0)
                 displayNode.SetDiffuse(1.0)
@@ -1555,6 +1594,7 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
                 displayNode.SetSpecular(0.3)
                 displayNode.SetOpacity(1.0)
                 displayNode.SetSliceIntersectionThickness(1)
+                self._applyTileShading(displayNode, shaded=True)
             displayNode.Modified()
         for idx, seed_node in enumerate(self.logic.seed_fiducial_nodes):
             if idx >= len(self.logic.seeds) or not seed_node:
@@ -2831,26 +2871,42 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
         tile_length = GammaTilePlacement.TILE_LENGTH_MM
         tile_width = GammaTilePlacement.TILE_WIDTH_MM
         tile_thickness_total = GammaTilePlacement.TILE_THICKNESS_MM
+        seed_depth = GammaTilePlacement.SEED_DEPTH_FROM_CONTACT_MM
 
-        plane = vtk.vtkCubeSource()
-        plane.SetXLength(tile_length)
-        plane.SetYLength(tile_width)
-        plane.SetZLength(tile_thickness_total)
-        plane.SetCenter(0, 0, 0)
-        plane.Update()
-        
-        polydata = plane.GetOutput()
-
-        triangulator = vtk.vtkTriangleFilter()
-        triangulator.SetInputData(polydata)
-        triangulator.Update()
-        polydata = triangulator.GetOutput()
-
-        subdivider = vtk.vtkLinearSubdivisionFilter()
-        subdivider.SetInputData(polydata)
-        subdivider.SetNumberOfSubdivisions(1)
-        subdivider.Update()
-        polydata = subdivider.GetOutput()
+        # The tile is drawn as two slabs split at the seed plane so the thicker,
+        # tissue-facing side (3 mm of collagen below the seeds) can be shaded slightly
+        # darker than the 1 mm cavity-facing side. A per-cell "TileSide" scalar
+        # (0 = tissue side, 1 = cavity side) is mapped through a two-entry color table;
+        # cell data survives the surface deformation and the rotate/translate transforms.
+        z_contact = -tile_thickness_total / 2.0
+        slabs = [
+            (z_contact, z_contact + seed_depth, 0),                 # tissue side
+            (z_contact + seed_depth, tile_thickness_total / 2.0, 1),  # cavity side
+        ]
+        appender = vtk.vtkAppendPolyData()
+        for z0, z1, side in slabs:
+            cube = vtk.vtkCubeSource()
+            cube.SetXLength(tile_length)
+            cube.SetYLength(tile_width)
+            cube.SetZLength(z1 - z0)
+            cube.SetCenter(0, 0, (z0 + z1) / 2.0)
+            triangulator = vtk.vtkTriangleFilter()
+            triangulator.SetInputConnection(cube.GetOutputPort())
+            subdivider = vtk.vtkLinearSubdivisionFilter()
+            subdivider.SetInputConnection(triangulator.GetOutputPort())
+            subdivider.SetNumberOfSubdivisions(1)
+            subdivider.Update()
+            slab = vtk.vtkPolyData()
+            slab.ShallowCopy(subdivider.GetOutput())
+            sides = vtk.vtkUnsignedCharArray()
+            sides.SetName("TileSide")
+            sides.SetNumberOfComponents(1)
+            sides.SetNumberOfTuples(slab.GetNumberOfCells())
+            sides.Fill(side)
+            slab.GetCellData().SetScalars(sides)
+            appender.AddInputData(slab)
+        appender.Update()
+        polydata = appender.GetOutput()
 
         transform = vtk.vtkTransform()
         transform.Translate(position[0], position[1], position[2])
@@ -2894,6 +2950,7 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
         displayNode.SetBackfaceCulling(False)
         displayNode.SetVisibility(True)
         displayNode.SetVisibility2D(True)
+        self._applyTileShading(displayNode, shaded=True)
 
         if not modelNode.GetScene():
             slicer.mrmlScene.AddNode(modelNode)

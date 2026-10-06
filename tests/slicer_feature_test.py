@@ -100,6 +100,16 @@ try:
     record("tile_place_3d_path", len(w.logic.tiles) == 1 and tileModel is not None and tileModel.GetScene() is not None,
            f"center={np.round(w.logic.tiles[0].center,2)} pen={pen:.2f} counter='{w.tileCounterLabel.text}'")
     record("tile_sits_on_surface", abs(np.linalg.norm(w.logic.tiles[0].center) - 70) < 4.0, f"|center|={np.linalg.norm(w.logic.tiles[0].center):.2f} (expect ~70+2)")
+    t0_ = w.logic.tiles[0]
+    depths = [float(np.dot(np.asarray(sp) - t0_.center, t0_.normal)) + 2.0 for sp in t0_.seed_positions_ras]  # distance above the contact face
+    record("seed_plane_3mm_from_contact_face", all(abs(d - 3.0) < 1e-3 for d in depths) and all(abs(float(sl[2]) - 1.0) < 1e-6 for sl in t0_.seed_positions_local),
+           f"seed depths above contact face = {np.round(depths, 3)} mm; local z = {[float(sl[2]) for sl in t0_.seed_positions_local]}")
+    pd_ = tileModel.GetPolyData(); sides_ = pd_.GetCellData().GetArray("TileSide")
+    nvals = set(int(sides_.GetTuple1(i)) for i in range(sides_.GetNumberOfTuples())) if sides_ else set()
+    dn_ = tileModel.GetDisplayNode(); cn_ = dn_.GetColorNode()
+    record("tile_two_tone_shading", sides_ is not None and nvals == {0, 1} and dn_.GetScalarVisibility() and dn_.GetActiveScalarName() == "TileSide"
+           and cn_ is not None and cn_.GetNumberOfColors() == 2,
+           f"TileSide values={sorted(nvals)}, scalarVisibility={dn_.GetScalarVisibility()}, activeScalar={dn_.GetActiveScalarName()}, colorNode={cn_.GetName() if cn_ else None}")
 
     # ---------- 5. Real 3D interactor click through onMouseClick ----------
     try:
@@ -159,6 +169,10 @@ try:
     record("tile_rotate", 9.0 < ang < 11.0 and np.allclose(tsel.normal, normal_before, atol=1e-5), f"seed axis rotated {ang:.1f} deg, normal unchanged; status='{w.statusLabel.text}'")
     w.onRotateTile(clockwise=False)
     record("tile_rotate_back", np.allclose(tsel.seed_axis_ras, axis_before, atol=1e-4), "counterclockwise restores axis")
+    sel_dn = w.logic.fiducial_nodes[w.selected_tile_index].GetDisplayNode()
+    record("selected_tile_uniform_highlight", not sel_dn.GetScalarVisibility(), f"scalarVisibility while selected={sel_dn.GetScalarVisibility()}")
+    moved_pd = w.logic.fiducial_nodes[w.selected_tile_index].GetPolyData()
+    record("shading_survives_edit", moved_pd.GetCellData().GetArray("TileSide") is not None, "TileSide cell array present after rotate/translate")
     w.onTranslateTile("right")
     moved = np.linalg.norm(w.logic.tiles[w.selected_tile_index].center - center_before)
     record("tile_translate", 0.5 < moved < 5.0, f"moved {moved:.2f} mm; status='{w.statusLabel.text}'")
