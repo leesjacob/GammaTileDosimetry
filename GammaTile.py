@@ -42,7 +42,12 @@ class DoseInterpolator:
         "CLRP_V2": "CLRP TG-43 v2 (2019)",
     }
 
-    DOSE_CONVERSION_FACTOR = 335.23 * 3.5  # cGy per air kerma strength; math was derived
+    # Total dose per unit air-kerma strength: initial dose rate integrated over complete
+    # decay, tau = T1/2 / ln 2 = 9.689 d / ln 2 = 335.48 h (TG-43U1S2 Table XXIV), times the
+    # nominal day-of-implant seed strength S_K = 3.5 U. Units: cGy per (cGy h^-1 U^-1).
+    CS131_MEAN_LIFE_H = 335.48
+    SEED_STRENGTH_U = 3.5
+    DOSE_CONVERSION_FACTOR = CS131_MEAN_LIFE_H * SEED_STRENGTH_U
     _LAMBDA = 1.056 #Dose rate constant (cGy h^-1 U^-1), TG-43U1S2 Table AI
     _L = 0.40 # Active source length (cm), TG-43U1S2 Table AI
 

@@ -1,0 +1,34 @@
+category,item,value,source
+Formalism,Dose model,AAPM TG-43U1 2D line-source formalism summed over all seeds,"Rivard et al., Med Phys 31:633-674 (2004)"
+Formalism,Reference point,"r0 = 1 cm, theta0 = 90 deg",TG-43U1
+Source,Model,IsoRay Proxcelan CS-1 Rev2 Cs-131,TG-43U1S2 Table AI
+Source,Dose-rate constant Lambda,1.056 cGy/h/U,TG-43U1S2 Table AI
+Source,Active length L,0.40 cm,TG-43U1S2 Table AI
+Source,Radial dose function g_L(r),"Consensus table, 16 radii 0.10-10 cm, linear interpolation",TG-43U1S2 Table AII
+Source,Anisotropy function F(r theta),"Consensus table, 14 angles x 10 radii, bilinear interpolation, F(r 90 deg) = 1",TG-43U1S2 Table AXIII
+Source,Air-kerma strength per seed,3.5 U (module default; report the clinical value used),Module constant
+Source,Decay integration,Initial dose rate integrated over complete decay (Cs-131 mean life 335.48 h = 9.689 d / ln 2),Module constant
+Geometry,Tile,"20 x 20 x 4 mm, 4 seeds at (+/-5, +/-5, 0) mm in tile plane, seeds parallel to tile local x axis",Module
+Geometry,Tile placement,Tile center 2 mm above surface (bottom face on surface); penetration capped at 10 mm,Module
+Geometry,Standalone seed,"4.5 mm long, 0.82 mm diameter, axis along surface normal, one end on surface",Module
+Implementation,Dose grid,2 mm isotropic over volume bounding box,Module
+Implementation,Range truncation,Voxels farther than 50 mm from every source set to zero; per-seed cutoff at 100 mm,Module
+Implementation,Near-source handling,No dose within 0.41 mm of seed center; r clipped to 0.041-10 cm; source-tip singularity guarded,Module
+Implementation,Missing table entries,F(r=0.1 cm) for theta <= 20 deg filled from r = 0.25 cm value,Module
+Implementation,Isodose surfaces,"100/90/50% of prescription, vtkFlyingEdges3D",Module
+Verification,QA table comparison,Engine vs corrected Table XII dose rate per unit source strength (cGy/h/U),"Rivard et al., Med Phys 45(2):971-974 (2018), doi 10.1002/mp.12728"
+Verification,QA points,143 positions; r 0.1-10 cm; theta 0-90 deg,tests/tg43_qa_check.py
+Verification,QA mean absolute difference,0.07%,tests/results/tg43_qa_TG43U1S2.csv
+Verification,QA maximum absolute difference,0.29% (r = 5 cm; theta = 80 deg),tests/results/tg43_qa_TG43U1S2.csv
+Verification,QA points outside +/-2%,0 of 143,tests/results/tg43_qa_TG43U1S2.csv
+Verification,Table nodes reproduced,g_L and F exact at all tabulated nodes; dose rate at (1 cm 90 deg) = Lambda,tests/slicer_feature_test.py
+Verification,Alternative dataset (CLRP TG-43 v2),Mean 1.20%; max 7.25%; 26 of 143 points outside +/-2%; differences concentrated at theta <= 10 deg,tests/results/tg43_qa_CLRP_V2.csv
+Verification,Consensus vs CLRP at clinical doses (>= 30 Gy on test grid),Mean -0.1%; range -2.3% to +2.1%,Session comparison
+Software,Vectorized vs original per-voxel engine,Bit-identical on same dataset; float32-level agreement on full grids (max rel 1.2e-7),Session comparison
+Software,Isosurface extraction,Flying edges vertex-identical to marching cubes at 3 levels,Session comparison
+Software,End-to-end feature test,42 of 42 checks passed (surface; placement; editing; dose; isodoses; exports),tests/results/slicer_feature_test_results.csv
+Software,Runtime,"96^3 voxel grid, 3 tiles + 1 seed: ~0.5 s including isodose extraction",Session measurement
+Limitation,Medium,"Homogeneous water; no tissue heterogeneity, tile/collagen attenuation, interseed shielding, air or bone",TG-43 assumption
+Limitation,Angular resolution,Consensus F binned at 5 deg near seed axis; 3-8% difference from finer MC data for theta <= 10 deg; < 0.5% for theta >= 15 deg,TG-43U1S2 vs CLRP v2
+Limitation,Source strength and decay,Fixed 3.5 U per seed with full-decay integration; no assay-to-implant decay or per-batch S_K unless entered,Module
+Limitation,Surface segmentation,Brain surface threshold mean + 0.5 SD; not patient-specific,Module
