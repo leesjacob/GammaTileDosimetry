@@ -1537,6 +1537,21 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
         seeds_count = len(self.logic.seeds)
         self.tileCounterLabel.setText(f"Tiles: {tiles_count}  |  Seeds: {seeds_count}")
     
+    # Isodose levels as fractions of the prescription, with display colors (RGB 0-1)
+    # matching the institutional planning-system legend (6480 ... 1200 cGy at 60 Gy).
+    ISODOSE_LEVELS = [
+        (1.08, (0.427, 0.118, 0.231), "108%"),  # 6480 cGy  #6d1e3b
+        (1.04, (0.518, 0.224, 0.204), "104%"),  # 6240 cGy  #843934
+        (1.00, (0.557, 0.114, 0.035), "100%"),  # 6000 cGy  #8e1d09
+        (0.95, (0.227, 0.341, 0.184), "95%"),   # 5700 cGy  #3a572f
+        (0.90, (0.435, 0.427, 0.220), "90%"),   # 5400 cGy  #6f6d38
+        (0.80, (0.098, 0.196, 0.502), "80%"),   # 4800 cGy  #193280
+        (0.65, (0.259, 0.345, 0.427), "65%"),   # 3900 cGy  #42586d
+        (0.50, (0.541, 0.278, 0.055), "50%"),   # 3000 cGy  #8a470e
+        (0.30, (0.388, 0.357, 0.380), "30%"),   # 1800 cGy  #635b61
+        (0.20, (0.161, 0.275, 0.094), "20%"),   # 1200 cGy  #294618
+    ]
+
     # Tile colors (RGB 0-1). The tissue-facing 3 mm slab is drawn slightly darker.
     TILE_COLOR = (1.0, 0.8, 0.0)
     TILE_TISSUE_SIDE_COLOR = (0.87, 0.67, 0.0)
@@ -3548,11 +3563,7 @@ class GammaTileWidget(ScriptedLoadableModuleWidget):
         prescription_cgy = self.logic.prescription_gy * 100
         max_dose = np.max(dose_array)
 
-        doses_3d = [
-            (prescription_cgy, (1, 0, 0), "100%"),
-            (0.9 * prescription_cgy, (1, 0.65, 0), "90%"),
-            (0.5 * prescription_cgy, (1, 1, 0), "50%")
-        ]
+        doses_3d = [(frac * prescription_cgy, color, label) for frac, color, label in self.ISODOSE_LEVELS]
         
         origin = [bounds_computed[0][0], bounds_computed[1][0], bounds_computed[2][0]]
 

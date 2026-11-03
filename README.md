@@ -30,7 +30,7 @@ The whole module is a single file, `GammaTile.py`. A full-head dose grid at 2 mm
 - Cursor mode for selecting a placed tile or seed in a 2D view, then rotating (10° steps) or translating (2 mm steps) it in that view's plane.
 - Undo of the last tile or last seed.
 - Vectorized TG-43U1 dose computation on a 2 mm grid over the whole volume.
-- 100%, 90% and 50% isodose surfaces of the prescription, rendered in 3D and as intersections in the slice views, with a colour legend.
+- Ten isodose surfaces from 108% to 20% of the prescription, rendered in 3D and as intersections in the slice views, with a colour legend.
 - Export of all seed and tile positions to CSV or JSON.
 - Export of the dose volume as DICOM RTDOSE (with SlicerRT), a DICOM image series, or NRRD.
 
@@ -106,7 +106,7 @@ The polar angle is measured from the seed's longitudinal axis and folded into [0
 - The grid covers the RAS bounding box of the selected volume at 2 mm isotropic spacing.
 - Only voxels within 50 mm of at least one tile or seed centre are evaluated; the rest are zero.
 - The result is stored in the scene as a scalar volume named *Dose Volume* (units cGy) and tagged as a dose volume for Subject Hierarchy.
-- Isodose surfaces are extracted at 100% (red), 90% (orange) and 50% (yellow) of the prescription with `vtkFlyingEdges3D`, and shown in 3D and as slice intersections. Surfaces whose level exceeds the maximum dose are skipped.
+- Isodose surfaces are extracted at 108, 104, 100, 95, 90, 80, 65, 50, 30 and 20% of the prescription (6480 to 1200 cGy at 60 Gy) with `vtkFlyingEdges3D`, and shown in 3D and as slice intersections. Colours follow the institutional planning-system legend and are defined in `GammaTileWidget.ISODOSE_LEVELS`. Surfaces whose level exceeds the maximum dose are skipped.
 - Each update removes the previous dose volume and isodose models before adding new ones.
 
 ## Export formats
@@ -181,7 +181,7 @@ python3 tests/tg43_qa_check.py
 
 The consensus engine reproduces the published table to the rounding level of its 3 to 4 significant figures. Results are in `tests/results/tg43_qa_TG43U1S2.csv` and `tests/results/tg43_qa_CLRP_V2.csv`; the feature-test results are in `tests/results/slicer_feature_test_results.csv`.
 
-**Headless feature test inside Slicer.** `tests/slicer_feature_test.py` loads the module through Slicer's module factory, builds a synthetic brain volume, and exercises every feature: brain surface creation, tile placement through the 3D interactor and through slice-view ray casting, seed placement, selection, rotation, translation, dose update (twice), isodose surfaces and legend, CSV and JSON export including the dataset name, the reference-point dose, the Gy conversion, DICOM series export with a pydicom read-back, NRRD export, undo, volume ray casting, cache invalidation and cleanup. It prints one `[TEST] PASS/FAIL` line per check (46 checks) and exits with code 0 when all pass:
+**Headless feature test inside Slicer.** `tests/slicer_feature_test.py` loads the module through Slicer's module factory, builds a synthetic brain volume, and exercises every feature: brain surface creation, tile placement through the 3D interactor and through slice-view ray casting, seed placement, selection, rotation, translation, dose update (twice), isodose surfaces and legend, CSV and JSON export including the dataset name, the reference-point dose, the Gy conversion, DICOM series export with a pydicom read-back, NRRD export, undo, volume ray casting, cache invalidation and cleanup. It prints one `[TEST] PASS/FAIL` line per check (47 checks) and exits with code 0 when all pass:
 
 ```bash
 /Applications/Slicer.app/Contents/MacOS/Slicer --testing --no-splash --python-script tests/slicer_feature_test.py

@@ -194,15 +194,19 @@ try:
     record("dose_update", dn is not None and darr is not None and np.nanmax(darr) > 0 and np.all(np.isfinite(darr)),
            f"max={np.nanmax(darr) if darr is not None else 'n/a'} cGy, dims={darr.shape if darr is not None else 'n/a'} in {dt:.2f}s; status='{w.statusLabel.text}'")
     iso = [nd for nd in w.logic.isodose_nodes_3d if nd and nd.GetScene()]
-    record("isodose_surfaces", len(iso) == 3 and all(nd.GetPolyData().GetNumberOfPoints() > 0 for nd in iso),
+    n_levels = sum(1 for frac, _, _ in w.ISODOSE_LEVELS if frac * w.logic.prescription_gy * 100 <= np.nanmax(darr))
+    record("isodose_surfaces", len(iso) == n_levels == len(w.ISODOSE_LEVELS) and all(nd.GetPolyData().GetNumberOfPoints() > 0 for nd in iso),
            f"{len(iso)} isodose nodes: {[ (nd.GetName(), nd.GetPolyData().GetNumberOfPoints()) for nd in iso]}")
-    record("dose_legend", w.legendWidget.layout().count() == 4, f"{w.legendWidget.layout().count()} legend layout entries (header + 3 levels)")
+    record("dose_legend", w.legendWidget.layout().count() == 1 + n_levels, f"{w.legendWidget.layout().count()} legend layout entries (header + {n_levels} levels)")
+    iso_colors = [tuple(round(c, 3) for c in nd.GetDisplayNode().GetColor()) for nd in iso]
+    expected_colors = [tuple(round(c, 3) for c in col) for _, col, _ in w.ISODOSE_LEVELS]
+    record("isodose_colors", iso_colors == expected_colors, f"{len(iso_colors)} surfaces colored per ISODOSE_LEVELS")
     # dose volume geometry: dose node bounds should match the volume RAS bounds
     b = [0.0]*6; dn.GetRASBounds(b); vb = [0.0]*6; vol.GetRASBounds(vb)
     record("dose_volume_geometry", all(abs(b[i]-vb[i]) < 4.0 for i in range(6)), f"dose bounds={np.round(b,1)} vol bounds={np.round(vb,1)}")
     # dose in RAS: max should be near a seed
     t0 = time.time(); w.onUpdate(); dt2 = time.time() - t0  # second update replaces nodes cleanly
-    record("dose_update_repeat", w.logic.dose_volume_node.GetScene() is not None and len([nd for nd in w.logic.isodose_nodes_3d if nd.GetScene()]) == 3 and slicer.mrmlScene.GetNumberOfNodesByClass("vtkMRMLScalarVolumeNode") == 2, f"second update {dt2:.2f}s; scalar volumes in scene={slicer.mrmlScene.GetNumberOfNodesByClass('vtkMRMLScalarVolumeNode')}")
+    record("dose_update_repeat", w.logic.dose_volume_node.GetScene() is not None and len([nd for nd in w.logic.isodose_nodes_3d if nd.GetScene()]) == n_levels and slicer.mrmlScene.GetNumberOfNodesByClass("vtkMRMLScalarVolumeNode") == 2, f"second update {dt2:.2f}s; scalar volumes in scene={slicer.mrmlScene.GetNumberOfNodesByClass('vtkMRMLScalarVolumeNode')}")
 
     # ---------- 10. Exports ----------
     dn = w.logic.dose_volume_node  # the repeat update replaced the node
